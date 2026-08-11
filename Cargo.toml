@@ -1,0 +1,17 @@
+[package]
+name = "serve-md"
+version = "0.1.0"
+edition = "2021"
+description = "A minimal web server that lists and renders Markdown files."
+license = "MIT"
+repository = "https://github.com/tayyebi/serve-md"
+keywords = ["markdown", "server", "docs", "web"]
+categories = ["command-line-utilities", "web-programming"]
+
+[dependencies]
+comrak = { version = "0.54", default-features = false }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

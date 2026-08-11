@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>{{title}}</title>
+<style>
+{{raw:style}}
+</style>
+</head>
+<body>
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="/">serve-md</a>
+    <span class="muted tagline">a tiny markdown server</span>
+  </div>
+</header>
+<main class="wrap">
+{{raw:body}}
+</main>
+<footer class="site-footer">
+  <div class="wrap">
+    <p class="muted">serve-md {{version}} &middot; {{file_count}} file(s) &middot; serving {{dir}}</p>
+  </div>
+</footer>
+</body>
+</html>

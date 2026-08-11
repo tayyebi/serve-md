@@ -1,0 +1,13 @@
+<h1>Markdown files</h1>
+<p class="muted">Serving <code>{{dir}}</code></p>
+{{#if empty}}
+<p class="empty">No <code>.md</code> files found.</p>
+{{/if}}
+<ul class="files">
+{{#for file}}
+  <li class="file">
+    <a class="file-link" href="/view/{{link}}">{{name}}</a>
+    <span class="file-meta">{{size}} &middot; {{mtime}}</span>
+  </li>
+{{/for}}
+</ul>
