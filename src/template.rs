@@ -59,7 +59,7 @@ impl<'a> Template<'a> {
 
             if lower.starts_with("#if ") {
                 let name = tag["#if ".len()..].trim();
-                let enabled = flags.iter().any(|f| *f == name);
+                let enabled = flags.contains(&name);
                 match find_block(content, body_start, "#if ", "/if") {
                     Some((body, end)) => {
                         if enabled {
