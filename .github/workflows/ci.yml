@@ -17,5 +17,5 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --all-targets -- --test-threads=1
+      - run: timeout 180 cargo test --all-targets -- --test-threads=1 --nocapture
       - run: cargo build --release
