@@ -14,12 +14,12 @@ const SKIP_DIRS: &[&str] = &[".git", ".hg", ".svn", "target", "node_modules"];
 
 pub fn scan(root: &Path) -> io::Result<Vec<FileEntry>> {
     let mut out = Vec::new();
-    walk(root, &mut out)?;
+    walk(root, root, &mut out)?;
     out.sort_by_cached_key(|f| f.rel.clone());
     Ok(out)
 }
 
-fn walk(dir: &Path, out: &mut Vec<FileEntry>) -> io::Result<()> {
+fn walk(root: &Path, dir: &Path, out: &mut Vec<FileEntry>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
@@ -28,7 +28,7 @@ fn walk(dir: &Path, out: &mut Vec<FileEntry>) -> io::Result<()> {
             if SKIP_DIRS.contains(&name.to_string_lossy().as_ref()) {
                 continue;
             }
-            walk(&entry.path(), out)?;
+            walk(root, &entry.path(), out)?;
         } else if file_type.is_file() {
             let name = entry.file_name();
             let is_md = Path::new(&name)
@@ -38,7 +38,7 @@ fn walk(dir: &Path, out: &mut Vec<FileEntry>) -> io::Result<()> {
                 .unwrap_or(false);
             if is_md {
                 let meta = entry.metadata()?;
-                let rel = rel_str(dir, &entry.path());
+                let rel = rel_str(root, &entry.path());
                 out.push(FileEntry {
                     rel,
                     size: meta.len(),
