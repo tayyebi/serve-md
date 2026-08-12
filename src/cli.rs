@@ -99,6 +99,7 @@ pub fn parse(args: &[String]) -> Result<ParseOutcome, String> {
                 } else {
                     return Err(format!("unknown argument: {arg}"));
                 }
+                i += 1;
             }
         }
     }
