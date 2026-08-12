@@ -85,15 +85,21 @@ pub fn parse(args: &[String]) -> Result<ParseOutcome, String> {
                 pass = Some(value(args, &mut i, "--pass")?);
                 i += 1;
             }
-            _ if arg.starts_with("--host=") => host = arg["--host=".len()..].to_string(),
-            _ if arg.starts_with("--port=") => {
-                let v = arg["--port=".len()..].to_string();
-                port = v.parse().map_err(|_| format!("invalid port: {v}"))?;
+            _ => {
+                if let Some(v) = arg.strip_prefix("--host=") {
+                    host = v.to_string();
+                } else if let Some(v) = arg.strip_prefix("--port=") {
+                    port = v.parse().map_err(|_| format!("invalid port: {v}"))?;
+                } else if let Some(v) = arg.strip_prefix("--dir=") {
+                    dir = PathBuf::from(v);
+                } else if let Some(v) = arg.strip_prefix("--user=") {
+                    user = Some(v.to_string());
+                } else if let Some(v) = arg.strip_prefix("--pass=") {
+                    pass = Some(v.to_string());
+                } else {
+                    return Err(format!("unknown argument: {arg}"));
+                }
             }
-            _ if arg.starts_with("--dir=") => dir = PathBuf::from(&arg["--dir=".len()..]),
-            _ if arg.starts_with("--user=") => user = Some(arg["--user=".len()..].to_string()),
-            _ if arg.starts_with("--pass=") => pass = Some(arg["--pass=".len()..].to_string()),
-            _ => return Err(format!("unknown argument: {arg}")),
         }
     }
 

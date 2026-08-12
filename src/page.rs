@@ -176,7 +176,7 @@ mod tests {
                 modified: SystemTime::UNIX_EPOCH,
             },
         ];
-        files.sort_by(|a, b| a.rel.cmp(&b.rel));
+        files.sort_by_key(|f| &f.rel);
         let out = listing_plain(&files, Path::new("/tmp/x"));
         assert!(out.starts_with("serve-md "));
         assert!(out.contains("a.md"));
