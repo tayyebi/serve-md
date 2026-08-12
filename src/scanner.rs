@@ -15,7 +15,7 @@ const SKIP_DIRS: &[&str] = &[".git", ".hg", ".svn", "target", "node_modules"];
 pub fn scan(root: &Path) -> io::Result<Vec<FileEntry>> {
     let mut out = Vec::new();
     walk(root, &mut out)?;
-    out.sort_by_key(|f| &f.rel);
+    out.sort_by_cached_key(|f| f.rel.clone());
     Ok(out)
 }
 
