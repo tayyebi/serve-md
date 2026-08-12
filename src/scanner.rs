@@ -1,6 +1,6 @@
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ fn walk(dir: &Path, out: &mut Vec<FileEntry>) -> io::Result<()> {
                 .unwrap_or(false);
             if is_md {
                 let meta = entry.metadata()?;
-                let rel = rel_str(root, &entry.path());
+                let rel = rel_str(dir, &entry.path());
                 out.push(FileEntry {
                     rel,
                     size: meta.len(),
@@ -65,6 +65,7 @@ fn rel_str(root: &Path, full: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);

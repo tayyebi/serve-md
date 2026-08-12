@@ -116,12 +116,12 @@ impl<'a> Template<'a> {
     }
 }
 
-fn find_block(
-    content: &str,
+fn find_block<'a>(
+    content: &'a str,
     from: usize,
     open_kind: &str,
     close_kind: &str,
-) -> Option<(&str, usize)> {
+) -> Option<(&'a str, usize)> {
     let mut depth = 0usize;
     for (idx, _) in content[from..].match_indices("{{") {
         let pos = from + idx;
@@ -147,7 +147,7 @@ fn find_block(
 mod tests {
     use super::*;
 
-    fn var(name: &str, value: &str) -> HashMap<&str, &str> {
+    fn var<'a>(name: &'a str, value: &'a str) -> HashMap<&'a str, &'a str> {
         let mut m = HashMap::new();
         m.insert(name, value);
         m

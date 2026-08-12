@@ -142,8 +142,8 @@ fn route(
     terminal: bool,
     is_head: bool,
 ) -> io::Result<()> {
-    let raw = req.target.split('?').next().unwrap_or("/");
-    let decoded = match percent_decode(raw) {
+    let target_path = req.target.split('?').next().unwrap_or("/");
+    let decoded = match percent_decode(target_path) {
         Ok(d) => d,
         Err(_) => {
             return respond(
@@ -376,8 +376,8 @@ fn write_head(
     extra: &[(&str, &str)],
 ) -> io::Result<()> {
     let mut head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {len}\r\n"
-            "Connection: close\r\nX-Content-Type-Options: nosniff\r\n"
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {len}\r\n\
+         Connection: close\r\nX-Content-Type-Options: nosniff\r\n"
     );
     for (k, v) in extra {
         head.push_str(k);
