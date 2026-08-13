@@ -32,12 +32,9 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
-      - name: Archive
-        shell: bash
+      - name: Upload binary
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf /tmp/${{ matrix.artifact }} *
-          cp /tmp/${{ matrix.artifact }} "$GITHUB_WORKSPACE/${{ matrix.artifact }}"
+          cp target/${{ matrix.target }}/release/serve-md${{ ends_with(matrix.target, "msvc") && ".exe" || "" }} ${{ matrix.artifact }}
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
