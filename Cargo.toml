@@ -1,6 +1,6 @@
 [package]
 name = "serve-md"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A minimal web server that lists and renders Markdown files."
 license = "MIT"
