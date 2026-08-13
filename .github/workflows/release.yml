@@ -36,7 +36,8 @@ jobs:
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf "$GITHUB_WORKSPACE/${{ matrix.artifact }}" "${{ matrix.archive }}"
+          tar czf /tmp/${{ matrix.artifact }} *
+          cp /tmp/${{ matrix.artifact }} "$GITHUB_WORKSPACE/${{ matrix.artifact }}"
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
