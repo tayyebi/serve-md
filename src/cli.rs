@@ -8,6 +8,7 @@ pub struct Config {
     pub user: Option<String>,
     pub pass: Option<String>,
     pub no_open: bool,
+    pub verbose: bool,
 }
 
 pub enum ParseOutcome {
@@ -60,6 +61,10 @@ pub fn parse(args: &[String]) -> Result<ParseOutcome, String> {
             "-V" | "--version" => return Ok(ParseOutcome::Version),
             "--no-open" => {
                 no_open = true;
+                i += 1;
+            }
+            "--verbose" => {
+                verbose = true;
                 i += 1;
             }
             "--host" => {

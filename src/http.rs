@@ -367,6 +367,43 @@ fn has_header_end(buf: &[u8]) -> bool {
     buf.windows(4).any(|w| w == b"\r\n\r\n") || buf.windows(2).any(|w| w == b"\n\n")
 }
 
+fn verbose_log(req: &Request, terminal: bool, ctx: &Ctx) {
+    if !ctx.verbose {
+        return;
+    }
+    let mut line = String::new();
+    line.push_str(&format!("{} {} ", req.method, req.target));
+    let wrapped = wrap_text(&line, 80);
+    println!("[verbose] request: {}", wrapped);
+    for (k, v) in &req.headers {
+        println!("[verbose]   {}: {}", k, v);
+    }
+    println!("[verbose]   user-agent: {}", req.ua);
+    println!("[verbose]   terminal: {}", terminal);
+    println!("[verbose]   auth: {}", ctx.auth.is_some());
+}
+
+fn wrap_text(s: &str, max_width: usize) -> String {
+    let mut result = String::new();
+    let mut line = String::new();
+    for word in s.split_whitespace() {
+        if line.is_empty() {
+            line.push_str(word);
+        } else if line.len() + 1 + word.len() <= max_width {
+            line.push_str(" ");
+            line.push_str(word);
+        } else {
+            line.push_str("\n");
+            result.push_str(&line);
+            line = word.to_string();
+        }
+    }
+    if !line.is_empty() {
+        result.push_str(&line);
+    }
+    result
+}
+
 fn write_head(
     stream: &mut TcpStream,
     status: u16,
