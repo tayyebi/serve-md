@@ -52,6 +52,7 @@ pub fn parse(args: &[String]) -> Result<ParseOutcome, String> {
     let mut user: Option<String> = None;
     let mut pass: Option<String> = None;
     let mut no_open = false;
+    let mut verbose = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -126,6 +127,7 @@ pub fn parse(args: &[String]) -> Result<ParseOutcome, String> {
         user,
         pass,
         no_open,
+        verbose,
     }))
 }
 
