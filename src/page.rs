@@ -117,7 +117,11 @@ fn body_html(files: &[FileEntry], dir: &str) -> String {
     let tpl = Template::new(include_str!("../templates/listing.html"));
     let mut vars: HashMap<&str, &str> = HashMap::new();
     vars.insert("dir", dir);
-    let flags: Vec<&str> = if files.is_empty() { vec!["empty"] } else { vec![] };
+    let flags: Vec<&str> = if files.is_empty() {
+        vec!["empty"]
+    } else {
+        vec!["nonempty"]
+    };
     let mut rows: Vec<Vec<(String, String)>> = Vec::with_capacity(files.len());
     for f in files {
         rows.push(vec![
@@ -137,7 +141,6 @@ fn render_page(title: &str, body: &str, file_count: usize, dir: &str) -> String 
     vars.insert("version", env!("CARGO_PKG_VERSION"));
     vars.insert("file_count", &count);
     vars.insert("dir", dir);
-    vars.insert("style", include_str!("../templates/style.css"));
     vars.insert("body", body);
     Template::new(include_str!("../templates/base.html")).render(&vars, &[], &[])
 }

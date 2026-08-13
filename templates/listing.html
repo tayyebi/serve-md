@@ -1,13 +1,26 @@
 <h1>Markdown files</h1>
-<p class="muted">Serving <code>{{dir}}</code></p>
+<p>Serving <code>{{dir}}</code></p>
 {{#if empty}}
-<p class="empty">No <code>.md</code> files found.</p>
+<p>No <code>.md</code> files found.</p>
 {{/if}}
-<ul class="files">
+{{#if nonempty}}
+<table>
+<caption>Files in {{dir}}</caption>
+<thead>
+<tr>
+<th scope="col">Name</th>
+<th scope="col">Size</th>
+<th scope="col">Modified</th>
+</tr>
+</thead>
+<tbody>
 {{#for file}}
-  <li class="file">
-    <a class="file-link" href="/view/{{link}}">{{name}}</a>
-    <span class="file-meta">{{size}} &middot; {{mtime}}</span>
-  </li>
+<tr>
+<td><a href="/view/{{link}}">{{name}}</a></td>
+<td>{{size}}</td>
+<td>{{mtime}}</td>
+</tr>
 {{/for}}
-</ul>
+</tbody>
+</table>
+{{/if}}

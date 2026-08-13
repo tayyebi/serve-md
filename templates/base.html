@@ -3,26 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="light dark">
 <title>{{title}}</title>
-<style>
-{{raw:style}}
-</style>
 </head>
 <body>
-<header class="site-header">
-  <div class="wrap">
-    <a class="brand" href="/">serve-md</a>
-    <span class="muted tagline">a tiny markdown server</span>
-  </div>
+<header>
+<p><a href="/"><strong>serve-md</strong></a> &mdash; a tiny markdown server</p>
 </header>
-<main class="wrap">
+<main>
 {{raw:body}}
 </main>
-<footer class="site-footer">
-  <div class="wrap">
-    <p class="muted">serve-md {{version}} &middot; {{file_count}} file(s) &middot; serving {{dir}}</p>
-  </div>
+<footer>
+<p>serve-md {{version}} &middot; {{file_count}} file(s) &middot; serving {{dir}}</p>
 </footer>
 </body>
 </html>
