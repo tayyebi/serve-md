@@ -23,7 +23,7 @@ dependencies beyond the markdown renderer (`comrak`).
 ## Usage
 
 ```
-serve-md 0.2.1
+serve-md 0.2.2
 A minimal web server that lists and renders Markdown files.
 
 USAGE:
