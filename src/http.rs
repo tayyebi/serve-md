@@ -395,10 +395,10 @@ fn wrap_text(s: &str, max_width: usize) -> String {
         if line.is_empty() {
             line.push_str(word);
         } else if line.len() + 1 + word.len() <= max_width {
-            line.push_str(" ");
+            line.push(' ');
             line.push_str(word);
         } else {
-            line.push_str("\n");
+            line.push('\n');
             result.push_str(&line);
             line = word.to_string();
         }
