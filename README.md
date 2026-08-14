@@ -13,7 +13,9 @@ dependencies beyond the markdown renderer (`comrak`).
   Click a file (`/view/<path>`) to see it rendered with GFM tables,
   strikethrough, autolinks, and task lists. A **Raw** link shows the source.
 - Terminal (`GET /` with a `curl`/`wget` user agent): a plain-text listing.
-  `GET /view/<path>` returns the raw markdown, so `curl` works like `cat`.
+  `GET /view/<path>` renders the markdown to reader-friendly ASCII (wrapped
+  paragraphs, underlined headings, ASCII tables, indented lists and code
+  blocks). `GET /raw/<path>` returns the untouched markdown source.
 - Optional HTTP Basic auth via `--user`/`--pass` (constant-time check).
 - Path-traversal safe: requests are validated and resolved strictly under the
   served directory, only `.md` files are served.
@@ -21,7 +23,7 @@ dependencies beyond the markdown renderer (`comrak`).
 ## Usage
 
 ```
-serve-md 0.1.0
+serve-md 0.2.1
 A minimal web server that lists and renders Markdown files.
 
 USAGE:
@@ -34,6 +36,7 @@ OPTIONS:
         --user <USER>      Require Basic auth username
         --pass <PASS>      Password for --user (or env SERVE_MD_PASSWORD)
         --no-open          Do not open a browser on startup
+        --verbose          Log each request to stdout
     -h, --help             Print help
     -V, --version          Print version
 
@@ -52,7 +55,7 @@ EXAMPLES:
 # list files
 $ curl http://127.0.0.1:8080/
 
-# view a file (rendered) — same as /raw for curl/wget
+# view a file (rendered to ASCII: wrapped text, tables, headings)
 $ curl http://127.0.0.1:8080/view/docs/guide.md
 
 # raw markdown

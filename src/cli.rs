@@ -32,6 +32,7 @@ OPTIONS:
         --user <USER>      Require Basic auth username
         --pass <PASS>      Password for --user (or env SERVE_MD_PASSWORD)
         --no-open          Do not open a browser on startup
+        --verbose          Log each request to stdout
     -h, --help             Print help
     -V, --version          Print version
 

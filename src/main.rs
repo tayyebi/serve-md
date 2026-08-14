@@ -1,3 +1,4 @@
+mod ascii;
 mod auth;
 mod cli;
 mod encoding;

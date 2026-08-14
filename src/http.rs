@@ -1,3 +1,4 @@
+use crate::ascii::markdown_to_ascii;
 use crate::auth::Auth;
 use crate::cli::Config;
 use crate::encoding::percent_decode;
@@ -24,6 +25,7 @@ struct Ctx {
     dir: PathBuf,
     files: Vec<FileEntry>,
     auth: Option<Auth>,
+    verbose: bool,
 }
 
 pub fn serve(cfg: Config) -> io::Result<()> {
@@ -41,6 +43,7 @@ fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
         dir: cfg.dir.clone(),
         files,
         auth,
+        verbose: cfg.verbose,
     });
 
     let addr = listener.local_addr()?;
@@ -103,6 +106,7 @@ fn handle_connection(stream: &mut TcpStream, ctx: &Ctx) -> io::Result<()> {
     }
 
     let terminal = ua_is_terminal(&req.ua);
+    verbose_log(&req, terminal, ctx);
     let auth_ok = match &ctx.auth {
         Some(a) => a.check(&req.headers),
         None => true,
@@ -211,12 +215,13 @@ fn view(
         Err(_) => return not_found(stream, terminal, is_head),
     };
     if terminal {
+        let body = markdown_to_ascii(&raw);
         respond(
             stream,
             200,
             "OK",
             "text/plain; charset=utf-8",
-            raw.as_bytes(),
+            body.as_bytes(),
             &[],
             is_head,
         )
@@ -479,6 +484,7 @@ mod tests {
             user: user.map(String::from),
             pass: pass.map(String::from),
             no_open: true,
+            verbose: false,
         };
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
@@ -555,7 +561,8 @@ mod tests {
 
         let (status, body, _) = http_get(addr, "/view/a.md", "Wget/1.21.4", None);
         assert_eq!(status, 200);
-        assert!(body.contains("# Alpha"));
+        assert!(body.contains("ALPHA"));
+        assert!(body.contains("Hello **world**."));
     }
 
     #[test]
