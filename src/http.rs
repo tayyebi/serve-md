@@ -19,6 +19,7 @@ struct Request {
     target: String,
     headers: Vec<(String, String)>,
     ua: String,
+    accept: String,
 }
 
 struct Ctx {
@@ -166,7 +167,7 @@ fn route(
         return listing(ctx, stream, terminal, is_head);
     }
     if let Some(rel) = decoded.strip_prefix("/view/").filter(|r| !r.is_empty()) {
-        return view(ctx, stream, rel, terminal, is_head);
+        return view(ctx, stream, rel, terminal, is_head, accept_wants_markdown(&req.accept));
     }
     if let Some(rel) = decoded.strip_prefix("/raw/").filter(|r| !r.is_empty()) {
         return raw(ctx, stream, rel, is_head);
@@ -206,6 +207,7 @@ fn view(
     rel: &str,
     terminal: bool,
     is_head: bool,
+    wants_markdown: bool,
 ) -> io::Result<()> {
     let Some(full) = resolve_rel(&ctx.dir, rel) else {
         return not_found(stream, terminal, is_head);
@@ -214,6 +216,17 @@ fn view(
         Ok(r) => r,
         Err(_) => return not_found(stream, terminal, is_head),
     };
+    if wants_markdown {
+        return respond(
+            stream,
+            200,
+            "OK",
+            "text/markdown; charset=utf-8",
+            raw.as_bytes(),
+            &[],
+            is_head,
+        );
+    }
     if terminal {
         let body = markdown_to_ascii(&raw);
         respond(
@@ -319,6 +332,13 @@ fn ua_is_terminal(ua: &str) -> bool {
     u.contains("curl") || u.contains("wget")
 }
 
+fn accept_wants_markdown(accept: &str) -> bool {
+    accept
+        .split(',')
+        .map(|part| part.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+        .any(|t| t == "text/markdown" || t == "text/x-markdown")
+}
+
 fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 4096];
@@ -360,11 +380,17 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
         .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
+    let accept = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("accept"))
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
     Ok(Some(Request {
         method,
         target,
         headers,
         ua,
+        accept,
     }))
 }
 
