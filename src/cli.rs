@@ -20,7 +20,7 @@ pub enum ParseOutcome {
 pub fn help() -> String {
     format!(
         "serve-md {version}
-A minimal web server that lists and renders Markdown files.
+A minimal web server that lists and renders Markdown and HTML files.
 
 USAGE:
     serve-md [OPTIONS]
@@ -40,7 +40,7 @@ EXAMPLES:
     serve-md
     serve-md --host 0.0.0.0 --port 9000 --dir ./docs
     serve-md --user admin --pass secret
-    curl -u admin:secret http://127.0.0.1:8080/view/README.md
+    curl -u admin:secret http://127.0.0.1:8080/README.md
 ",
         version = env!("CARGO_PKG_VERSION")
     )

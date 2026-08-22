@@ -1,9 +1,10 @@
-use crate::ascii::markdown_to_ascii;
 use crate::auth::Auth;
 use crate::cli::Config;
 use crate::encoding::percent_decode;
+use crate::mime;
 use crate::page;
-use crate::scanner::{scan, FileEntry};
+use crate::render;
+use crate::scanner::{scan, FileEntry, FileKind};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -162,17 +163,13 @@ fn route(
             );
         }
     };
+    let rel = decoded.strip_prefix('/').unwrap_or(&decoded);
 
-    if decoded == "/" {
-        return listing(ctx, stream, terminal, is_head);
+    match resolve(&ctx.dir, rel) {
+        Resolved::File(full, kind) => serve_file(ctx, stream, &full, kind, terminal, &req.accept, is_head),
+        Resolved::Listing => listing(ctx, stream, terminal, is_head),
+        Resolved::NotFound => not_found(stream, terminal, is_head),
     }
-    if let Some(rel) = decoded.strip_prefix("/view/").filter(|r| !r.is_empty()) {
-        return view(ctx, stream, rel, terminal, is_head, accept_wants_markdown(&req.accept));
-    }
-    if let Some(rel) = decoded.strip_prefix("/raw/").filter(|r| !r.is_empty()) {
-        return raw(ctx, stream, rel, is_head);
-    }
-    not_found(stream, terminal, is_head)
 }
 
 fn listing(ctx: &Ctx, stream: &mut TcpStream, terminal: bool, is_head: bool) -> io::Result<()> {
@@ -201,35 +198,48 @@ fn listing(ctx: &Ctx, stream: &mut TcpStream, terminal: bool, is_head: bool) -> 
     }
 }
 
-fn view(
+/// Serves an already-resolved file, negotiating format for `Markdown`/`Html`
+/// (`Accept: text/markdown` -> source, `Accept: text/plain` or a terminal
+/// client -> reader-friendly text, else rendered HTML) and streaming
+/// `Static` files as-is with a guessed MIME type.
+fn serve_file(
     ctx: &Ctx,
     stream: &mut TcpStream,
-    rel: &str,
+    full: &Path,
+    kind: FileKind,
     terminal: bool,
+    accept: &str,
     is_head: bool,
-    wants_markdown: bool,
 ) -> io::Result<()> {
-    let Some(full) = resolve_rel(&ctx.dir, rel) else {
-        return not_found(stream, terminal, is_head);
-    };
-    let raw = match fs::read_to_string(&full) {
+    if kind == FileKind::Static {
+        let bytes = match fs::read(full) {
+            Ok(b) => b,
+            Err(_) => return not_found(stream, terminal, is_head),
+        };
+        return respond(stream, 200, "OK", mime::guess(full), &bytes, &[], is_head);
+    }
+
+    let src = match fs::read_to_string(full) {
         Ok(r) => r,
         Err(_) => return not_found(stream, terminal, is_head),
     };
-    if wants_markdown {
+    let rel = display_rel(&ctx.dir, full);
+
+    if accept_wants(accept, "text/markdown") {
+        let body = render::to_markdown(kind, &src);
         return respond(
             stream,
             200,
             "OK",
             "text/markdown; charset=utf-8",
-            raw.as_bytes(),
+            body.as_bytes(),
             &[],
             is_head,
         );
     }
-    if terminal {
-        let body = markdown_to_ascii(&raw);
-        respond(
+    if terminal || accept_wants(accept, "text/plain") {
+        let body = render::to_text(kind, &src);
+        return respond(
             stream,
             200,
             "OK",
@@ -237,39 +247,36 @@ fn view(
             body.as_bytes(),
             &[],
             is_head,
-        )
-    } else {
-        let html = page::render_markdown(&raw);
-        let body = page::view_html(rel, &html, &ctx.dir, ctx.files.len());
-        respond(
-            stream,
-            200,
-            "OK",
-            "text/html; charset=utf-8",
-            body.as_bytes(),
-            &[],
-            is_head,
-        )
+        );
     }
-}
 
-fn raw(ctx: &Ctx, stream: &mut TcpStream, rel: &str, is_head: bool) -> io::Result<()> {
-    let Some(full) = resolve_rel(&ctx.dir, rel) else {
-        return not_found(stream, true, is_head);
-    };
-    let raw = match fs::read_to_string(&full) {
-        Ok(r) => r,
-        Err(_) => return not_found(stream, true, is_head),
+    let html = render::to_html(kind, &src);
+    let body = match kind {
+        FileKind::Markdown => page::view_html(&rel, &html, &ctx.dir, ctx.files.len()),
+        _ => html,
     };
     respond(
         stream,
         200,
         "OK",
-        "text/markdown; charset=utf-8",
-        raw.as_bytes(),
+        "text/html; charset=utf-8",
+        body.as_bytes(),
         &[],
         is_head,
     )
+}
+
+fn display_rel(root: &Path, full: &Path) -> String {
+    let root_c = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let rel = full.strip_prefix(&root_c).unwrap_or(full);
+    let mut out = String::new();
+    for comp in rel.components() {
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(&comp.as_os_str().to_string_lossy());
+    }
+    out
 }
 
 fn not_found(stream: &mut TcpStream, terminal: bool, is_head: bool) -> io::Result<()> {
@@ -297,34 +304,64 @@ fn not_found(stream: &mut TcpStream, terminal: bool, is_head: bool) -> io::Resul
     }
 }
 
-fn resolve_rel(root: &Path, rel: &str) -> Option<PathBuf> {
-    if rel.is_empty() || rel.starts_with('/') || rel.contains('\\') {
-        return None;
+const INDEX_CANDIDATES: &[&str] = &["index.html", "index.md"];
+
+enum Resolved {
+    File(PathBuf, FileKind),
+    Listing,
+    NotFound,
+}
+
+/// Resolves a percent-decoded, leading-slash-stripped request path to a file
+/// under `root`. A path that names a directory (including the served root
+/// itself) falls back to `index.html`, then `index.md`, inside it; if
+/// neither exists, the caller should show the full-tree listing page.
+fn resolve(root: &Path, rel: &str) -> Resolved {
+    let trimmed = rel.trim_end_matches('/');
+    if trimmed.contains('\\') {
+        return Resolved::NotFound;
     }
-    for seg in rel.split('/') {
-        if seg.is_empty() || seg == "." || seg == ".." {
-            return None;
+    if !trimmed.is_empty() {
+        for seg in trimmed.split('/') {
+            if seg.is_empty() || seg == "." || seg == ".." {
+                return Resolved::NotFound;
+            }
         }
     }
-    let root_c = root.canonicalize().ok()?;
-    let candidate = root_c.join(rel);
-    let cand_c = candidate.canonicalize().ok()?;
+    let Ok(root_c) = root.canonicalize() else {
+        return Resolved::NotFound;
+    };
+    let candidate = if trimmed.is_empty() {
+        root_c.clone()
+    } else {
+        root_c.join(trimmed)
+    };
+    let Ok(cand_c) = candidate.canonicalize() else {
+        return Resolved::NotFound;
+    };
     if !cand_c.starts_with(&root_c) {
-        return None;
+        return Resolved::NotFound;
     }
-    let meta = fs::metadata(&cand_c).ok()?;
-    if !meta.is_file() {
-        return None;
+    let Ok(meta) = fs::metadata(&cand_c) else {
+        return Resolved::NotFound;
+    };
+    if meta.is_file() {
+        let kind = FileKind::from_path(&cand_c);
+        return Resolved::File(cand_c, kind);
     }
-    let is_md = cand_c
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("md"))
-        .unwrap_or(false);
-    if !is_md {
-        return None;
+    if meta.is_dir() {
+        for name in INDEX_CANDIDATES {
+            let idx = cand_c.join(name);
+            if let Ok(idx_c) = idx.canonicalize() {
+                if idx_c.starts_with(&root_c) && fs::metadata(&idx_c).map(|m| m.is_file()).unwrap_or(false) {
+                    let kind = FileKind::from_path(&idx_c);
+                    return Resolved::File(idx_c, kind);
+                }
+            }
+        }
+        return Resolved::Listing;
     }
-    Some(cand_c)
+    Resolved::NotFound
 }
 
 fn ua_is_terminal(ua: &str) -> bool {
@@ -332,11 +369,11 @@ fn ua_is_terminal(ua: &str) -> bool {
     u.contains("curl") || u.contains("wget")
 }
 
-fn accept_wants_markdown(accept: &str) -> bool {
+fn accept_wants(accept: &str, wanted: &str) -> bool {
     accept
         .split(',')
         .map(|part| part.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
-        .any(|t| t == "text/markdown" || t == "text/x-markdown")
+        .any(|t| t == wanted || (wanted == "text/markdown" && t == "text/x-markdown"))
 }
 
 fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
@@ -499,6 +536,7 @@ mod tests {
         fs::write(dir.join("a.md"), "# Alpha\n\nHello **world**.\n").unwrap();
         fs::write(dir.join("docs").join("b.md"), "# Beta\n").unwrap();
         fs::write(dir.join("ignore.txt"), "not markdown").unwrap();
+        fs::write(dir.join("page.html"), "<h1>Gamma</h1><p>Hello <b>html</b>.</p>").unwrap();
         dir
     }
 
@@ -527,10 +565,23 @@ mod tests {
         ua: &str,
         auth: Option<&str>,
     ) -> (u16, String, String) {
+        http_get_accept(addr, path, ua, auth, None)
+    }
+
+    fn http_get_accept(
+        addr: SocketAddr,
+        path: &str,
+        ua: &str,
+        auth: Option<&str>,
+        accept: Option<&str>,
+    ) -> (u16, String, String) {
         let mut s = TcpStream::connect(addr).unwrap();
         let mut req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nUser-Agent: {ua}\r\n");
         if let Some(a) = auth {
             req.push_str(&format!("Authorization: Basic {a}\r\n"));
+        }
+        if let Some(a) = accept {
+            req.push_str(&format!("Accept: {a}\r\n"));
         }
         req.push_str("\r\n");
         s.write_all(req.as_bytes()).unwrap();
@@ -555,24 +606,26 @@ mod tests {
     }
 
     #[test]
-    fn listing_and_views() {
+    fn listing_and_direct_views() {
         let addr = start_server(setup(), None, None);
         let (status, body, ct) = http_get(addr, "/", "test-agent", None);
         assert_eq!(status, 200);
         assert!(ct.contains("text/html"));
         assert!(body.contains("a.md"));
         assert!(body.contains("docs/b.md"));
-        assert!(!body.contains("ignore.txt"));
+        assert!(body.contains("ignore.txt"));
 
-        let (status, body, _) = http_get(addr, "/view/a.md", "test-agent", None);
+        let (status, body, _) = http_get(addr, "/a.md", "test-agent", None);
         assert_eq!(status, 200);
         assert!(body.contains("<h1>Alpha</h1>"));
 
-        let (status, body, _) = http_get(addr, "/raw/a.md", "test-agent", None);
+        let (status, body, ct) =
+            http_get_accept(addr, "/a.md", "test-agent", None, Some("text/markdown"));
         assert_eq!(status, 200);
+        assert!(ct.contains("text/markdown"));
         assert!(body.contains("# Alpha"));
 
-        let (status, _, _) = http_get(addr, "/view/missing.md", "test-agent", None);
+        let (status, _, _) = http_get(addr, "/missing.md", "test-agent", None);
         assert_eq!(status, 404);
     }
 
@@ -585,7 +638,7 @@ mod tests {
         assert!(body.contains("a.md"));
         assert!(body.contains("docs/b.md"));
 
-        let (status, body, _) = http_get(addr, "/view/a.md", "Wget/1.21.4", None);
+        let (status, body, _) = http_get(addr, "/a.md", "Wget/1.21.4", None);
         assert_eq!(status, 200);
         assert!(body.contains("ALPHA"));
         assert!(body.contains("Hello **world**."));
@@ -595,15 +648,96 @@ mod tests {
     fn traversal_rejected() {
         let addr = start_server(setup(), None, None);
         for path in [
-            "/view/..%2F..%2Fetc%2Fpasswd",
-            "/view/../a.md",
-            "/raw/../../etc/passwd",
-            "/view/a.md%00",
-            "/view/a.md\\..\\x",
+            "/..%2F..%2Fetc%2Fpasswd",
+            "/../a.md",
+            "/../../etc/passwd",
+            "/a.md%00",
+            "/a.md\\..\\x",
         ] {
             let (status, _, _) = http_get(addr, path, "curl/8.7.1", None);
             assert_eq!(status, 404, "path: {path}");
         }
+    }
+
+    #[test]
+    fn serves_html_files_and_negotiates() {
+        let addr = start_server(setup(), None, None);
+        let (status, body, _) = http_get(addr, "/", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(body.contains("page.html"));
+
+        let (status, body, ct) = http_get(addr, "/page.html", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(ct.contains("text/html"));
+        assert!(body.contains("<h1>Gamma</h1>"));
+
+        let (status, body, ct) =
+            http_get_accept(addr, "/page.html", "test-agent", None, Some("text/markdown"));
+        assert_eq!(status, 200);
+        assert!(ct.contains("text/markdown"));
+        assert!(body.contains("# Gamma"));
+        assert!(body.contains("**html**"));
+
+        let (status, body, ct) =
+            http_get_accept(addr, "/page.html", "test-agent", None, Some("text/plain"));
+        assert_eq!(status, 200);
+        assert!(ct.contains("text/plain"));
+        assert!(body.contains("Gamma"));
+        assert!(!body.contains('<'));
+    }
+
+    #[test]
+    fn serves_static_assets_with_guessed_mime() {
+        let dir = setup();
+        fs::write(dir.join("style.css"), "body { color: red; }").unwrap();
+        fs::write(dir.join("favicon.ico"), b"\x00\x00\x01\x00").unwrap();
+        let addr = start_server(dir, None, None);
+
+        let (status, body, ct) = http_get(addr, "/style.css", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(ct.contains("text/css"));
+        assert!(body.contains("color: red"));
+
+        let (status, _, ct) = http_get(addr, "/favicon.ico", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(ct.contains("image/x-icon"));
+    }
+
+    #[test]
+    fn index_fallback_for_directories() {
+        let dir = setup();
+        fs::write(dir.join("docs").join("index.md"), "# Docs Index\n").unwrap();
+        let addr = start_server(dir, None, None);
+
+        let (status, body, _) = http_get(addr, "/docs", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(body.contains("Docs Index"));
+
+        let (status, body, _) = http_get(addr, "/docs/", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(body.contains("Docs Index"));
+    }
+
+    #[test]
+    fn root_index_html_takes_precedence_over_listing() {
+        let dir = setup();
+        fs::write(dir.join("index.html"), "<h1>Home</h1>").unwrap();
+        let addr = start_server(dir, None, None);
+
+        let (status, body, ct) = http_get(addr, "/", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(ct.contains("text/html"));
+        assert!(body.contains("<h1>Home</h1>"));
+        assert!(!body.contains("Serving"));
+    }
+
+    #[test]
+    fn directory_without_index_falls_back_to_listing() {
+        let addr = start_server(setup(), None, None);
+        let (status, body, ct) = http_get(addr, "/docs", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(ct.contains("text/html"));
+        assert!(body.contains("docs/b.md"));
     }
 
     #[test]

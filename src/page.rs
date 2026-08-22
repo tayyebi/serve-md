@@ -1,5 +1,5 @@
 use crate::encoding::percent_encode_path;
-use crate::scanner::FileEntry;
+use crate::scanner::{FileEntry, FileKind};
 use crate::template::Template;
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,15 +18,13 @@ pub fn render_markdown(src: &str) -> String {
 pub fn listing_html(files: &[FileEntry], dir: &Path) -> String {
     let dir_str = dir.display().to_string();
     let body = body_html(files, &dir_str);
-    render_page("Markdown files", &body, files.len(), &dir_str)
+    render_page("Files", &body, files.len(), &dir_str)
 }
 
 pub fn view_html(rel: &str, markdown_html: &str, dir: &Path, file_count: usize) -> String {
     let dir_str = dir.display().to_string();
-    let link = percent_encode_path(rel);
     let mut vars: HashMap<&str, &str> = HashMap::new();
     vars.insert("name", rel);
-    vars.insert("rel", &link);
     vars.insert("content", markdown_html);
     let body = Template::new(include_str!("../templates/view.html")).render(&vars, &[], &[]);
     render_page(rel, &body, file_count, &dir_str)
@@ -41,7 +39,7 @@ pub fn listing_plain(files: &[FileEntry], dir: &Path) -> String {
         dir.display()
     ));
     if files.is_empty() {
-        out.push_str("(no .md files found)\n");
+        out.push_str("(no files found)\n");
         return out;
     }
     let width = files.iter().map(|f| f.rel.len()).max().unwrap_or(0);
@@ -56,8 +54,8 @@ pub fn listing_plain(files: &[FileEntry], dir: &Path) -> String {
         out.push_str(&format_time(f.modified));
         out.push('\n');
     }
-    out.push_str("\nview a file:  curl <base>/view/<path>\n");
-    out.push_str("raw markdown:  curl <base>/raw/<path>\n");
+    out.push_str("\nview a file:        curl <base>/<path>\n");
+    out.push_str("force markdown/text: curl -H 'Accept: text/markdown' <base>/<path>\n");
     out
 }
 
@@ -172,11 +170,13 @@ mod tests {
                 rel: "docs/guide.md".into(),
                 size: 2048,
                 modified: SystemTime::UNIX_EPOCH,
+                kind: FileKind::Markdown,
             },
             FileEntry {
                 rel: "a.md".into(),
                 size: 10,
                 modified: SystemTime::UNIX_EPOCH,
+                kind: FileKind::Markdown,
             },
         ];
         files.sort_by_cached_key(|f| f.rel.clone());
@@ -185,7 +185,7 @@ mod tests {
         assert!(out.contains("a.md"));
         assert!(out.contains("docs/guide.md"));
         assert!(out.contains("2.0 KiB"));
-        assert!(out.contains("/raw/<path>"));
+        assert!(out.contains("curl <base>/<path>"));
     }
 
     #[test]
@@ -194,6 +194,7 @@ mod tests {
             rel: "a<b>.md".into(),
             size: 1,
             modified: SystemTime::UNIX_EPOCH,
+            kind: FileKind::Markdown,
         }];
         let out = listing_html(&files, Path::new("/tmp"));
         assert!(out.contains("a&lt;b&gt;.md"));
@@ -201,9 +202,8 @@ mod tests {
     }
 
     #[test]
-    fn view_html_contains_links() {
+    fn view_html_contains_content() {
         let out = view_html("docs/my file.md", "<p>hi</p>", Path::new("/tmp"), 3);
-        assert!(out.contains("/raw/docs/my%20file.md"));
         assert!(out.contains("my file.md"));
         assert!(out.contains("<p>hi</p>"));
     }

@@ -1,9 +1,12 @@
 mod ascii;
 mod auth;
 mod cli;
+mod convert;
 mod encoding;
 mod http;
+mod mime;
 mod page;
+mod render;
 mod scanner;
 mod template;
 

@@ -1,8 +1,8 @@
 [package]
 name = "serve-md"
-version = "0.2.4"
+version = "0.3.0"
 edition = "2021"
-description = "A minimal web server that lists and renders Markdown files."
+description = "A minimal web server that lists and renders Markdown and HTML files."
 license = "MIT"
 repository = "https://github.com/tayyebi/serve-md"
 keywords = ["markdown", "server", "docs", "web"]

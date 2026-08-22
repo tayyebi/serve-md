@@ -3,11 +3,37 @@ use std::io;
 use std::path::Path;
 use std::time::SystemTime;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Markdown,
+    Html,
+    /// Any other file, served as a static asset with a guessed MIME type.
+    Static,
+}
+
+impl FileKind {
+    pub fn from_ext(ext: &str) -> FileKind {
+        match ext.to_ascii_lowercase().as_str() {
+            "md" | "markdown" => FileKind::Markdown,
+            "html" | "htm" => FileKind::Html,
+            _ => FileKind::Static,
+        }
+    }
+
+    pub fn from_path(path: &Path) -> FileKind {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some(ext) => FileKind::from_ext(ext),
+            None => FileKind::Static,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub rel: String,
     pub size: u64,
     pub modified: SystemTime,
+    pub kind: FileKind,
 }
 
 const SKIP_DIRS: &[&str] = &[".git", ".hg", ".svn", "target", "node_modules"];
@@ -31,20 +57,15 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<FileEntry>) -> io::Result<()> {
             walk(root, &entry.path(), out)?;
         } else if file_type.is_file() {
             let name = entry.file_name();
-            let is_md = Path::new(&name)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("md"))
-                .unwrap_or(false);
-            if is_md {
-                let meta = entry.metadata()?;
-                let rel = rel_str(root, &entry.path());
-                out.push(FileEntry {
-                    rel,
-                    size: meta.len(),
-                    modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                });
-            }
+            let kind = FileKind::from_path(Path::new(&name));
+            let meta = entry.metadata()?;
+            let rel = rel_str(root, &entry.path());
+            out.push(FileEntry {
+                rel,
+                size: meta.len(),
+                modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                kind,
+            });
         }
     }
     Ok(())
@@ -82,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn recursive_sorted_and_filtered() {
+    fn recursive_sorted_and_skips_dotdirs() {
         let d = tmp("t");
         fs::create_dir_all(d.join("sub/deep")).unwrap();
         fs::create_dir_all(d.join(".git")).unwrap();
@@ -98,7 +119,43 @@ mod tests {
 
         let files = scan(&d).unwrap();
         let rels: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
-        assert_eq!(rels, vec!["README.MD", "a.md", "b.md", "sub/c.md", "sub/deep/d.md"]);
+        assert_eq!(
+            rels,
+            vec!["README.MD", "a.md", "b.md", "note.txt", "sub/c.md", "sub/deep/d.md"]
+        );
+        assert_eq!(
+            files.iter().find(|f| f.rel == "note.txt").unwrap().kind,
+            FileKind::Static
+        );
+    }
+
+    #[test]
+    fn classifies_html_static_and_markdown() {
+        let d = tmp("html");
+        fs::write(d.join("page.html"), "<h1>hi</h1>").unwrap();
+        fs::write(d.join("frag.htm"), "<p>hi</p>").unwrap();
+        fs::write(d.join("doc.md"), "# hi").unwrap();
+        fs::write(d.join("style.css"), "body{}").unwrap();
+        fs::write(d.join("favicon.ico"), "x").unwrap();
+
+        let files = scan(&d).unwrap();
+        let rels: Vec<String> = files.iter().map(|f| f.rel.clone()).collect();
+        assert_eq!(
+            rels,
+            vec!["doc.md", "favicon.ico", "frag.htm", "page.html", "style.css"]
+        );
+        assert_eq!(
+            files.iter().find(|f| f.rel == "page.html").unwrap().kind,
+            FileKind::Html
+        );
+        assert_eq!(
+            files.iter().find(|f| f.rel == "doc.md").unwrap().kind,
+            FileKind::Markdown
+        );
+        assert_eq!(
+            files.iter().find(|f| f.rel == "style.css").unwrap().kind,
+            FileKind::Static
+        );
     }
 
     #[test]

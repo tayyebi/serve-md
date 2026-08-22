@@ -1,7 +1,7 @@
-<h1>Markdown files</h1>
+<h1>Files</h1>
 <p>Serving <code>{{dir}}</code></p>
 {{#if empty}}
-<p>No <code>.md</code> files found.</p>
+<p>No files found.</p>
 {{/if}}
 {{#if nonempty}}
 <table>
@@ -16,7 +16,7 @@
 <tbody>
 {{#for file}}
 <tr>
-<td><a href="/view/{{link}}">{{name}}</a></td>
+<td><a href="/{{link}}">{{name}}</a></td>
 <td>{{size}}</td>
 <td>{{mtime}}</td>
 </tr>
