@@ -1,5 +1,5 @@
 use crate::encoding::percent_encode_path;
-use crate::scanner::{FileEntry, FileKind};
+use crate::scanner::FileEntry;
 use crate::template::Template;
 use std::collections::HashMap;
 use std::path::Path;
@@ -170,13 +170,11 @@ mod tests {
                 rel: "docs/guide.md".into(),
                 size: 2048,
                 modified: SystemTime::UNIX_EPOCH,
-                kind: FileKind::Markdown,
             },
             FileEntry {
                 rel: "a.md".into(),
                 size: 10,
                 modified: SystemTime::UNIX_EPOCH,
-                kind: FileKind::Markdown,
             },
         ];
         files.sort_by_cached_key(|f| f.rel.clone());
@@ -194,7 +192,6 @@ mod tests {
             rel: "a<b>.md".into(),
             size: 1,
             modified: SystemTime::UNIX_EPOCH,
-            kind: FileKind::Markdown,
         }];
         let out = listing_html(&files, Path::new("/tmp"));
         assert!(out.contains("a&lt;b&gt;.md"));

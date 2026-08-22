@@ -352,11 +352,12 @@ fn resolve(root: &Path, rel: &str) -> Resolved {
     if meta.is_dir() {
         for name in INDEX_CANDIDATES {
             let idx = cand_c.join(name);
-            if let Ok(idx_c) = idx.canonicalize() {
-                if idx_c.starts_with(&root_c) && fs::metadata(&idx_c).map(|m| m.is_file()).unwrap_or(false) {
-                    let kind = FileKind::from_path(&idx_c);
-                    return Resolved::File(idx_c, kind);
-                }
+            let valid = idx.canonicalize().ok().filter(|idx_c| {
+                idx_c.starts_with(&root_c) && fs::metadata(idx_c).map(|m| m.is_file()).unwrap_or(false)
+            });
+            if let Some(idx_c) = valid {
+                let kind = FileKind::from_path(&idx_c);
+                return Resolved::File(idx_c, kind);
             }
         }
         return Resolved::Listing;

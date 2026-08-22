@@ -33,7 +33,6 @@ pub struct FileEntry {
     pub rel: String,
     pub size: u64,
     pub modified: SystemTime,
-    pub kind: FileKind,
 }
 
 const SKIP_DIRS: &[&str] = &[".git", ".hg", ".svn", "target", "node_modules"];
@@ -56,15 +55,12 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<FileEntry>) -> io::Result<()> {
             }
             walk(root, &entry.path(), out)?;
         } else if file_type.is_file() {
-            let name = entry.file_name();
-            let kind = FileKind::from_path(Path::new(&name));
             let meta = entry.metadata()?;
             let rel = rel_str(root, &entry.path());
             out.push(FileEntry {
                 rel,
                 size: meta.len(),
                 modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                kind,
             });
         }
     }
@@ -123,14 +119,10 @@ mod tests {
             rels,
             vec!["README.MD", "a.md", "b.md", "note.txt", "sub/c.md", "sub/deep/d.md"]
         );
-        assert_eq!(
-            files.iter().find(|f| f.rel == "note.txt").unwrap().kind,
-            FileKind::Static
-        );
     }
 
     #[test]
-    fn classifies_html_static_and_markdown() {
+    fn scans_html_and_static_files_too() {
         let d = tmp("html");
         fs::write(d.join("page.html"), "<h1>hi</h1>").unwrap();
         fs::write(d.join("frag.htm"), "<p>hi</p>").unwrap();
@@ -144,18 +136,17 @@ mod tests {
             rels,
             vec!["doc.md", "favicon.ico", "frag.htm", "page.html", "style.css"]
         );
-        assert_eq!(
-            files.iter().find(|f| f.rel == "page.html").unwrap().kind,
-            FileKind::Html
-        );
-        assert_eq!(
-            files.iter().find(|f| f.rel == "doc.md").unwrap().kind,
-            FileKind::Markdown
-        );
-        assert_eq!(
-            files.iter().find(|f| f.rel == "style.css").unwrap().kind,
-            FileKind::Static
-        );
+    }
+
+    #[test]
+    fn classifies_by_extension() {
+        assert_eq!(FileKind::from_ext("md"), FileKind::Markdown);
+        assert_eq!(FileKind::from_ext("MARKDOWN"), FileKind::Markdown);
+        assert_eq!(FileKind::from_ext("html"), FileKind::Html);
+        assert_eq!(FileKind::from_ext("HTM"), FileKind::Html);
+        assert_eq!(FileKind::from_ext("css"), FileKind::Static);
+        assert_eq!(FileKind::from_path(Path::new("page.html")), FileKind::Html);
+        assert_eq!(FileKind::from_path(Path::new("noext")), FileKind::Static);
     }
 
     #[test]

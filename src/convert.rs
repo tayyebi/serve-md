@@ -372,13 +372,11 @@ pub fn html_to_text(html: &str) -> String {
                         | "blockquote"
                         | "pre"
                 );
-                if is_block && (closing || name == "br" || name == "hr") {
-                    if !out.ends_with("\n\n") {
-                        if !out.ends_with('\n') {
-                            out.push('\n');
-                        }
+                if is_block && (closing || name == "br" || name == "hr") && !out.ends_with("\n\n") {
+                    if !out.ends_with('\n') {
                         out.push('\n');
                     }
+                    out.push('\n');
                 }
             }
         }
