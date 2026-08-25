@@ -5,15 +5,13 @@ const WIDTH: usize = 80;
 
 /// Renders Markdown source to reader-friendly plain-text ASCII, suitable for
 /// terminal clients (curl, wget) that can't render HTML.
-pub fn markdown_to_ascii(src: &str) -> String {
+///
+/// `options` comes from the active plugin set, so this sees the same AST the
+/// HTML renderer does. Plugin AST transforms are *not* applied here — they
+/// produce HTML, which is meaningless in a terminal.
+pub fn markdown_to_ascii(src: &str, options: &Options<'_>) -> String {
     let arena = Arena::new();
-    let mut options = Options::default();
-    options.extension.strikethrough = true;
-    options.extension.tagfilter = true;
-    options.extension.table = true;
-    options.extension.autolink = true;
-    options.extension.tasklist = true;
-    let root = parse_document(&arena, src, &options);
+    let root = parse_document(&arena, src, options);
 
     let mut out = render_blocks(root, WIDTH).join("\n");
     out.push('\n');
@@ -266,6 +264,20 @@ fn render_inline_into<'a>(node: &'a AstNode<'a>, out: &mut String) {
                 out.push(')');
             }
             NodeValue::HtmlInline(html) => out.push_str(&strip_tags(&html)),
+            // Math nodes have no children, so without this arm the generic
+            // fallback below would recurse into nothing and drop the formula.
+            // The delimiters are kept so the output stays unambiguous and can
+            // be pasted straight back into a .md file.
+            NodeValue::Math(m) => {
+                let (open, close) = match (m.dollar_math, m.display_math) {
+                    (true, true) => ("$$", "$$"),
+                    (true, false) => ("$", "$"),
+                    (false, _) => ("$`", "`$"),
+                };
+                out.push_str(open);
+                out.push_str(m.literal.trim());
+                out.push_str(close);
+            }
             _ => render_inline_into(child, out),
         }
     }
@@ -341,10 +353,22 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin::Set;
+
+    /// Renders with no plugins active — the default configuration.
+    fn ascii(src: &str) -> String {
+        markdown_to_ascii(src, &Set::default().options())
+    }
+
+    /// Renders with the math plugin's parser extensions on.
+    fn ascii_math(src: &str) -> String {
+        let set = Set::resolve(&["math".to_string()]).unwrap();
+        markdown_to_ascii(src, &set.options())
+    }
 
     #[test]
     fn renders_headings() {
-        let out = markdown_to_ascii("# Title\n\n## Sub\n");
+        let out = ascii("# Title\n\n## Sub\n");
         assert!(out.contains("TITLE"));
         assert!(out.contains("====="));
         assert!(out.contains("Sub"));
@@ -353,14 +377,14 @@ mod tests {
 
     #[test]
     fn renders_paragraph_and_emphasis() {
-        let out = markdown_to_ascii("Hello **world**, this is *ascii*.\n");
+        let out = ascii("Hello **world**, this is *ascii*.\n");
         assert!(out.contains("**world**"));
         assert!(out.contains("*ascii*"));
     }
 
     #[test]
     fn renders_unordered_list() {
-        let out = markdown_to_ascii("- one\n- two\n  - nested\n");
+        let out = ascii("- one\n- two\n  - nested\n");
         assert!(out.contains("- one"));
         assert!(out.contains("- two"));
         assert!(out.contains("- nested"));
@@ -368,21 +392,21 @@ mod tests {
 
     #[test]
     fn renders_ordered_list() {
-        let out = markdown_to_ascii("1. first\n2. second\n");
+        let out = ascii("1. first\n2. second\n");
         assert!(out.contains("1. first"));
         assert!(out.contains("2. second"));
     }
 
     #[test]
     fn renders_task_list() {
-        let out = markdown_to_ascii("- [ ] todo\n- [x] done\n");
+        let out = ascii("- [ ] todo\n- [x] done\n");
         assert!(out.contains("- [ ] todo"));
         assert!(out.contains("- [x] done"));
     }
 
     #[test]
     fn renders_table() {
-        let out = markdown_to_ascii("| A | B |\n|---|---|\n| 1 | 2 |\n");
+        let out = ascii("| A | B |\n|---|---|\n| 1 | 2 |\n");
         assert!(out.contains('+'));
         assert!(out.contains("| A"));
         assert!(out.contains("| 1"));
@@ -390,26 +414,50 @@ mod tests {
 
     #[test]
     fn renders_blockquote() {
-        let out = markdown_to_ascii("> quoted text\n");
+        let out = ascii("> quoted text\n");
         assert!(out.contains("> quoted text"));
     }
 
     #[test]
     fn renders_code_block() {
-        let out = markdown_to_ascii("```\nfn main() {}\n```\n");
+        let out = ascii("```\nfn main() {}\n```\n");
         assert!(out.contains("    fn main() {}"));
     }
 
     #[test]
     fn renders_link() {
-        let out = markdown_to_ascii("[docs](https://example.com)\n");
+        let out = ascii("[docs](https://example.com)\n");
         assert!(out.contains("docs (https://example.com)"));
     }
 
     #[test]
     fn wraps_long_paragraphs() {
         let long = "word ".repeat(40);
-        let out = markdown_to_ascii(&long);
+        let out = ascii(&long);
         assert!(out.lines().all(|l| l.chars().count() <= WIDTH));
+    }
+
+    #[test]
+    fn math_keeps_its_delimiters() {
+        let out = ascii_math("mass energy $E = mc^2$ here\n");
+        assert!(out.contains("$E = mc^2$"), "{out}");
+    }
+
+    #[test]
+    fn display_math_keeps_double_delimiters() {
+        let out = ascii_math("$$x^2 + y^2$$\n");
+        assert!(out.contains("$$x^2 + y^2$$"), "{out}");
+    }
+
+    #[test]
+    fn code_math_keeps_backtick_delimiters() {
+        let out = ascii_math("inline $`a + b`$ here\n");
+        assert!(out.contains("$`a + b`$"), "{out}");
+    }
+
+    #[test]
+    fn math_is_plain_text_without_the_plugin() {
+        let out = ascii("mass energy $E = mc^2$ here\n");
+        assert!(out.contains("$E = mc^2$"), "{out}");
     }
 }

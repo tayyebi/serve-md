@@ -3,6 +3,7 @@ use crate::cli::Config;
 use crate::encoding::percent_decode;
 use crate::mime;
 use crate::page;
+use crate::plugin;
 use crate::render;
 use crate::scanner::{scan, FileEntry, FileKind};
 use std::fs;
@@ -28,6 +29,7 @@ struct Ctx {
     files: Vec<FileEntry>,
     auth: Option<Auth>,
     verbose: bool,
+    plugins: plugin::Set,
 }
 
 pub fn serve(cfg: Config) -> io::Result<()> {
@@ -46,6 +48,7 @@ fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
         files,
         auth,
         verbose: cfg.verbose,
+        plugins: cfg.plugins,
     });
 
     let addr = listener.local_addr()?;
@@ -60,6 +63,9 @@ fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
     println!("serving: {}", cfg.dir.display());
     if let Some(u) = &cfg.user {
         println!("auth: Basic ({u})");
+    }
+    if !ctx.plugins.is_empty() {
+        println!("plugins: {}", ctx.plugins.names().join(", "));
     }
     println!("  {url}");
     if !cfg.no_open {
@@ -238,7 +244,7 @@ fn serve_file(
         );
     }
     if terminal || accept_wants(accept, "text/plain") {
-        let body = render::to_text(kind, &src);
+        let body = render::to_text(kind, &src, &ctx.plugins);
         return respond(
             stream,
             200,
@@ -250,10 +256,16 @@ fn serve_file(
         );
     }
 
-    let html = render::to_html(kind, &src);
+    let rendered = render::to_html(kind, &src, &ctx.plugins);
     let body = match kind {
-        FileKind::Markdown => page::view_html(&rel, &html, &ctx.dir, ctx.files.len()),
-        _ => html,
+        FileKind::Markdown => page::view_html(
+            &rel,
+            &rendered.html,
+            &rendered.head,
+            &ctx.dir,
+            ctx.files.len(),
+        ),
+        _ => rendered.html,
     };
     respond(
         stream,
@@ -542,6 +554,16 @@ mod tests {
     }
 
     fn start_server(dir: PathBuf, user: Option<&str>, pass: Option<&str>) -> SocketAddr {
+        start_server_with(dir, user, pass, &[])
+    }
+
+    fn start_server_with(
+        dir: PathBuf,
+        user: Option<&str>,
+        pass: Option<&str>,
+        plugins: &[&str],
+    ) -> SocketAddr {
+        let names: Vec<String> = plugins.iter().map(|s| s.to_string()).collect();
         let cfg = Config {
             host: "127.0.0.1".into(),
             port: 0,
@@ -550,6 +572,7 @@ mod tests {
             pass: pass.map(String::from),
             no_open: true,
             verbose: false,
+            plugins: plugin::Set::resolve(&names).unwrap(),
         };
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
@@ -763,5 +786,104 @@ mod tests {
         let mut resp = String::new();
         let _ = s.read_to_string(&mut resp);
         assert!(resp.starts_with("HTTP/1.1 200"));
+    }
+
+    fn math_dir() -> PathBuf {
+        let dir = tmp_dir("math");
+        fs::write(
+            dir.join("math.md"),
+            concat!(
+                "# Euler\n\nThe identity $e^{i\\pi} + 1 = 0$ links five constants.\n\n",
+                "$$\\int_0^\\infty e^{-x^2} dx$$\n"
+            ),
+        )
+        .unwrap();
+        fs::write(dir.join("plain.md"), "# Plain\n\nNo formulas here.\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn math_plugin_renders_mathml() {
+        let addr = start_server_with(math_dir(), None, None, &["math"]);
+        let (status, body, ct) = http_get(addr, "/math.md", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(ct.contains("text/html"));
+        assert!(body.contains("<math"), "{body}");
+        assert!(body.contains("display=\"block\""), "{body}");
+        // Fully server-rendered: no client-side typesetting is shipped.
+        assert!(!body.contains("<script"), "{body}");
+        // The plugin's style block rides along only on pages it touched.
+        assert!(body.contains("<style"), "{body}");
+        let (_, plain, _) = http_get(addr, "/plain.md", "test-agent", None);
+        assert!(!plain.contains("<style"), "{plain}");
+    }
+
+    #[test]
+    fn math_is_inert_without_the_plugin() {
+        let addr = start_server(math_dir(), None, None);
+        let (status, body, _) = http_get(addr, "/math.md", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(!body.contains("<math"), "{body}");
+        assert!(!body.contains("<style"), "{body}");
+    }
+
+    #[test]
+    fn math_reaches_terminals_as_latex() {
+        let addr = start_server_with(math_dir(), None, None, &["math"]);
+        let (status, body, ct) = http_get(addr, "/math.md", "curl/8.0", None);
+        assert_eq!(status, 200);
+        assert!(ct.contains("text/plain"));
+        assert!(body.contains("$e^{i\\pi} + 1 = 0$"), "{body}");
+        assert!(!body.contains("<math"), "{body}");
+    }
+
+    #[test]
+    fn math_source_survives_the_markdown_route() {
+        let addr = start_server_with(math_dir(), None, None, &["math"]);
+        let (status, body, ct) =
+            http_get_accept(addr, "/math.md", "test-agent", None, Some("text/markdown"));
+        assert_eq!(status, 200);
+        assert!(ct.contains("text/markdown"));
+        assert!(body.contains("$e^{i\\pi} + 1 = 0$"), "{body}");
+    }
+
+    #[test]
+    fn mermaid_plugin_renders_inline_svg() {
+        let dir = tmp_dir("mermaid");
+        fs::write(
+            dir.join("flow.md"),
+            "# Flow\n\n```mermaid\nflowchart LR\n  A[Start] --> B[End]\n```\n",
+        )
+        .unwrap();
+        let addr = start_server_with(dir.clone(), None, None, &["mermaid"]);
+        let (status, body, _) = http_get(addr, "/flow.md", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(body.contains("<svg"), "{body}");
+        assert!(body.contains(">Start<"), "{body}");
+        // Server-rendered: nothing executable reaches the client.
+        assert!(!body.contains("<script"), "{body}");
+
+        // Off by default, the fence stays an ordinary code block.
+        let plain = start_server(dir, None, None);
+        let (_, body, _) = http_get(plain, "/flow.md", "test-agent", None);
+        assert!(!body.contains("<svg"), "{body}");
+        assert!(body.contains("language-mermaid"), "{body}");
+    }
+
+    #[test]
+    fn both_plugins_can_run_together() {
+        let dir = tmp_dir("both");
+        fs::write(
+            dir.join("mixed.md"),
+            "$E = mc^2$\n\n```mermaid\nflowchart TD\n  A --> B\n```\n",
+        )
+        .unwrap();
+        let addr = start_server_with(dir, None, None, &["math", "mermaid"]);
+        let (status, body, _) = http_get(addr, "/mixed.md", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(body.contains("<math"), "{body}");
+        assert!(body.contains("<svg"), "{body}");
+        // Each plugin contributes its own <head> block.
+        assert_eq!(body.matches("<style>").count(), 2, "{body}");
     }
 }

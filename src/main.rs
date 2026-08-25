@@ -6,6 +6,7 @@ mod encoding;
 mod http;
 mod mime;
 mod page;
+mod plugin;
 mod render;
 mod scanner;
 mod template;

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-fn escape_html(input: &str) -> String {
+/// Escapes text for inclusion in HTML element content or an attribute value.
+pub(crate) fn escape_html(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for c in input.chars() {
         match c {
