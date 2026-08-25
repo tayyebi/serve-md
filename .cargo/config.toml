@@ -1,0 +1,8 @@
+# Statically link the MSVC runtime so the binary needs no Visual C++
+# redistributable installed on the target machine. The Linux musl targets are
+# static by default, so they need nothing here.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

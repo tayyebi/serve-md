@@ -3,6 +3,8 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Lets the release build be smoke-tested without cutting a tag.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,8 +17,11 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             artifact: serve-md-linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact: serve-md-linux-aarch64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: serve-md-windows-x86_64.exe
@@ -29,12 +34,48 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+
+      # Rust ships its own musl libc, but the target still wants a musl-aware
+      # linker driver.
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
       - run: cargo build --release --target ${{ matrix.target }}
-      - name: Upload binary
+
+      # The whole point of the musl targets: assert it, do not assume it.
+      # A binary with a NEEDED entry or a program interpreter is dynamically
+      # linked and would inherit the build machine's glibc version.
+      - name: Verify the Linux binary is fully static
+        if: endsWith(matrix.target, 'musl')
+        run: |
+          bin=target/${{ matrix.target }}/release/serve-md
+          file "$bin"
+          if readelf -d "$bin" 2>/dev/null | grep -q NEEDED; then
+            echo "::error::binary links shared libraries"
+            readelf -d "$bin"
+            exit 1
+          fi
+          if readelf -l "$bin" 2>/dev/null | grep -q INTERP; then
+            echo "::error::binary requires a dynamic loader"
+            exit 1
+          fi
+          echo "OK: no shared libraries, no dynamic loader"
+
+      - name: Stage binary
         shell: bash
         run: |
           cp target/${{ matrix.target }}/release/serve-md${{ endsWith(matrix.target, 'msvc') && '.exe' || '' }} ${{ matrix.artifact }}
+
+      # So a manual dry run can be inspected without publishing anything.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
       - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.artifact }}

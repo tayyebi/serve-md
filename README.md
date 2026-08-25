@@ -5,8 +5,9 @@ and HTML rendering. Every file in the served directory is reachable at its
 real path — `index.html`, `style.css`, `favicon.ico`, images, video, `.md`
 docs, all of it. `.md` and `.html` files additionally render as a clean,
 reader-friendly page for browsers and plain text for `curl`/`wget`, with
-optional HTTP Basic auth. Ships as a single binary, with `comrak` as its only
-dependency — the plugins, template engine, HTML tokenizer, base64 and
+optional HTTP Basic auth. Ships as a single **statically linked** binary with
+no runtime dependencies — not even libc — and builds from just one crate
+(`comrak`); the plugins, template engine, HTML tokenizer, base64 and
 percent-encoding are all hand-rolled.
 
 ## Features
@@ -200,19 +201,46 @@ $ curl -H 'Accept: text/markdown' http://127.0.0.1:8080/design.md
 $ curl http://127.0.0.1:8080/favicon.ico -o favicon.ico
 ```
 
+## Install
+
+Download a binary from [releases][releases] and run it — there is nothing to
+install alongside it.
+
+| Binary | Target | Requires |
+| ------ | ------ | -------- |
+| `serve-md-linux-x86_64` | `x86_64-unknown-linux-musl` | any Linux kernel; **no glibc, no shared libraries** |
+| `serve-md-linux-aarch64` | `aarch64-unknown-linux-musl` | any ARM64 Linux kernel; same |
+| `serve-md-windows-x86_64.exe` | `x86_64-pc-windows-msvc` | no Visual C++ redistributable (the CRT is linked in) |
+
+The Linux builds target musl and are fully static, so they run on old
+distributions regardless of the glibc version installed — a dynamically linked
+build made on a current runner would refuse to start on anything older than the
+machine that produced it. CI asserts this on every release: a binary carrying a
+`NEEDED` entry or a program interpreter fails the build.
+
+[releases]: https://github.com/tayyebi/serve-md/releases
+
 ## Build
 
 ```
 cargo build --release
 ```
 
-GitHub Actions runs `fmt`, `clippy`, `test`, and a release build on every push.
-Pushing a `v*` tag builds release binaries for Linux and Windows and attaches
-them to a GitHub release.
+For a static Linux binary matching the released ones:
 
 ```
-git tag v0.1.0
-git push origin v0.1.0
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+GitHub Actions runs `clippy`, tests and a release build on every push. Pushing a
+`v*` tag builds the release binaries and attaches them to a GitHub release; the
+same workflow can be run manually from the Actions tab to test a build without
+tagging.
+
+```
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 ## License
