@@ -5,29 +5,27 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn render_markdown(src: &str) -> String {
-    let mut options = comrak::Options::default();
-    options.extension.strikethrough = true;
-    options.extension.tagfilter = true;
-    options.extension.table = true;
-    options.extension.autolink = true;
-    options.extension.tasklist = true;
-    comrak::markdown_to_html(src, &options)
-}
-
 pub fn listing_html(files: &[FileEntry], dir: &Path) -> String {
     let dir_str = dir.display().to_string();
     let body = body_html(files, &dir_str);
-    render_page("Files", &body, files.len(), &dir_str)
+    render_page("Files", &body, "", files.len(), &dir_str)
 }
 
-pub fn view_html(rel: &str, markdown_html: &str, dir: &Path, file_count: usize) -> String {
+/// `head` is extra `<head>` markup contributed by render plugins; empty for
+/// documents no plugin touched.
+pub fn view_html(
+    rel: &str,
+    markdown_html: &str,
+    head: &str,
+    dir: &Path,
+    file_count: usize,
+) -> String {
     let dir_str = dir.display().to_string();
     let mut vars: HashMap<&str, &str> = HashMap::new();
     vars.insert("name", rel);
     vars.insert("content", markdown_html);
     let body = Template::new(include_str!("../templates/view.html")).render(&vars, &[], &[]);
-    render_page(rel, &body, file_count, &dir_str)
+    render_page(rel, &body, head, file_count, &dir_str)
 }
 
 pub fn listing_plain(files: &[FileEntry], dir: &Path) -> String {
@@ -63,6 +61,7 @@ pub fn not_found_html() -> String {
     render_page(
         "Not found",
         include_str!("../templates/not_found.html"),
+        "",
         0,
         ".",
     )
@@ -72,6 +71,7 @@ pub fn unauthorized_html() -> String {
     render_page(
         "Unauthorized",
         include_str!("../templates/unauthorized.html"),
+        "",
         0,
         ".",
     )
@@ -132,10 +132,13 @@ fn body_html(files: &[FileEntry], dir: &str) -> String {
     tpl.render(&vars, &rows, &flags)
 }
 
-fn render_page(title: &str, body: &str, file_count: usize, dir: &str) -> String {
+fn render_page(title: &str, body: &str, head: &str, file_count: usize, dir: &str) -> String {
     let count = file_count.to_string();
     let mut vars: HashMap<&str, &str> = HashMap::new();
     vars.insert("title", title);
+    // Always inserted, even when empty: an unmatched {{...}} would be left in
+    // the output as literal text.
+    vars.insert("head", head);
     vars.insert("version", env!("CARGO_PKG_VERSION"));
     vars.insert("file_count", &count);
     vars.insert("dir", dir);
@@ -200,8 +203,21 @@ mod tests {
 
     #[test]
     fn view_html_contains_content() {
-        let out = view_html("docs/my file.md", "<p>hi</p>", Path::new("/tmp"), 3);
+        let out = view_html("docs/my file.md", "<p>hi</p>", "", Path::new("/tmp"), 3);
         assert!(out.contains("my file.md"));
         assert!(out.contains("<p>hi</p>"));
+    }
+
+    #[test]
+    fn view_html_injects_plugin_head_markup_unescaped() {
+        let out = view_html("a.md", "<p>hi</p>", "<style>math{}</style>", Path::new("/tmp"), 1);
+        assert!(out.contains("<style>math{}</style>"));
+        assert!(!out.contains("&lt;style&gt;"));
+    }
+
+    #[test]
+    fn pages_without_plugins_have_no_head_markup() {
+        let out = listing_html(&[], Path::new("/tmp"));
+        assert!(!out.contains("<style"));
     }
 }
