@@ -266,19 +266,26 @@ fn parse_chain(stmt: &str, graph: &mut Graph) {
                 link,
             });
         }
-        let Some((link, label, after)) = tail else {
+        let Some(next) = tail else {
             return;
         };
-        if after.trim().is_empty() {
+        if next.rest.trim().is_empty() {
             return; // dangling link, e.g. `A -->`
         }
-        pending = Some((current, link, label));
-        rest = after;
+        pending = Some((current, next.link, next.label));
+        rest = next.rest;
     }
 }
 
+/// A link operator, its optional label, and the text following it.
+struct LinkTo<'a> {
+    link: Link,
+    label: Option<String>,
+    rest: &'a str,
+}
+
 /// Splits off the first node spec, returning it plus the link that followed.
-fn split_at_link(s: &str) -> (&str, Option<(Link, Option<String>, &str)>) {
+fn split_at_link(s: &str) -> (&str, Option<LinkTo<'_>>) {
     let bytes = s.as_bytes();
     let mut i = 0;
     let mut depth = 0i32;
@@ -288,9 +295,8 @@ fn split_at_link(s: &str) -> (&str, Option<(Link, Option<String>, &str)>) {
             b']' | b')' | b'}' => depth -= 1,
             b'-' | b'=' if depth <= 0 => {
                 if let Some((len, link)) = match_link(&s[i..]) {
-                    let after = &s[i + len..];
-                    let (label, after) = match_label(after);
-                    return (&s[..i], Some((link, label, after)));
+                    let (label, rest) = match_label(&s[i + len..]);
+                    return (&s[..i], Some(LinkTo { link, label, rest }));
                 }
             }
             _ => {}

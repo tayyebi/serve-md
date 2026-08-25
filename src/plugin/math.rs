@@ -368,15 +368,15 @@ impl Parser {
     fn number(&mut self) -> String {
         let mut out = String::new();
         while let Some(c) = self.peek() {
-            if c.is_ascii_digit() {
-                out.push(c);
-                self.i += 1;
-            } else if c == '.' && matches!(self.c.get(self.i + 1), Some(d) if d.is_ascii_digit()) {
-                out.push(c);
-                self.i += 1;
-            } else {
+            // A dot belongs to the number only when a digit follows it, so
+            // `1.` and `f.x` are left alone.
+            let decimal_point =
+                c == '.' && matches!(self.c.get(self.i + 1), Some(d) if d.is_ascii_digit());
+            if !c.is_ascii_digit() && !decimal_point {
                 break;
             }
+            out.push(c);
+            self.i += 1;
         }
         out
     }
