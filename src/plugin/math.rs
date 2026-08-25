@@ -44,7 +44,7 @@ impl Plugin for Math {
         options.extension.math_code = true; // $`x`$ and ```math fences
     }
 
-    fn transform<'a>(&self, _arena: &'a Arena<AstNode<'a>>, root: &'a AstNode<'a>) -> bool {
+    fn transform<'a>(&self, _arena: &'a Arena<'a>, root: &'a AstNode<'a>) -> bool {
         let mut found = false;
         for node in root.descendants() {
             // Scoped so the shared borrow is released before the mutation below.

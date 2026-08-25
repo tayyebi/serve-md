@@ -49,7 +49,7 @@ impl Plugin for Mermaid {
         "render mermaid flowcharts as inline SVG"
     }
 
-    fn transform<'a>(&self, _arena: &'a Arena<AstNode<'a>>, root: &'a AstNode<'a>) -> bool {
+    fn transform<'a>(&self, _arena: &'a Arena<'a>, root: &'a AstNode<'a>) -> bool {
         let mut found = false;
         for node in root.descendants() {
             let replacement = {

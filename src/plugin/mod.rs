@@ -35,7 +35,7 @@ pub trait Plugin: Sync {
     /// terminal clients still see the original source constructs. `arena` is
     /// unused by the current plugins but lets a future one allocate new nodes
     /// rather than only rewriting existing ones.
-    fn transform<'a>(&self, _arena: &'a Arena<AstNode<'a>>, _root: &'a AstNode<'a>) -> bool {
+    fn transform<'a>(&self, _arena: &'a Arena<'a>, _root: &'a AstNode<'a>) -> bool {
         false
     }
 
@@ -78,6 +78,13 @@ pub struct Rendered {
 /// The plugins enabled for this process. Empty unless `--plugin` was passed.
 #[derive(Default)]
 pub struct Set(Vec<&'static dyn Plugin>);
+
+/// `&dyn Plugin` cannot derive `Debug`, and the useful view is the names.
+impl std::fmt::Debug for Set {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.names()).finish()
+    }
+}
 
 impl Set {
     /// Looks each name up in [`REGISTRY`], ignoring repeats. Fails on an
