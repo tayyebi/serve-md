@@ -38,11 +38,23 @@ percent-encoding are all hand-rolled.
 - **Render plugins**: opt-in extensions to the Markdown pipeline, selected
   with `--plugin <NAME>`. Nothing is enabled by default. Currently ships
   `math` and `mermaid` — see below.
-- Recursively skips `.git`, `target`, `node_modules`, and friends when
-  listing or resolving files.
+- **Hidden and VCS paths are refused**, by the listing *and* by the router:
+  `.git`, `.hg`, `.svn`, `target`, `node_modules`, and any dot-prefixed name
+  (`.env`, `.htpasswd`, ...) are neither listed nor reachable by typing their
+  path. `.well-known` is the one exception, so ACME and `security.txt` still
+  work.
 - Optional HTTP Basic auth via `--user`/`--pass` (constant-time check).
-- Path-traversal safe: requests are validated and resolved strictly under the
-  served directory.
+- **Path-traversal safe**: a request path is vetted as a string before the
+  filesystem is touched — every segment must be one plain file name, so
+  `..`, backslashes, control bytes, Windows drive letters and absolute
+  segments are all refused — and the resolved path is then required to sit
+  inside the served directory and to land on no forbidden name, which is
+  what stops a symlink from smuggling one in. Only origin-form targets
+  (`/path`) are routed at all.
+- **Bounded by design**: caps on live connections (503 past the ceiling),
+  request-head size, header count, path length and depth, plus read, write
+  and total header-read deadlines, so no single client can wedge the server.
+  Static files stream from disk rather than being buffered in memory.
 
 ## Usage
 

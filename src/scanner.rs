@@ -35,7 +35,28 @@ pub struct FileEntry {
     pub modified: SystemTime,
 }
 
+/// Directory names never listed and never served: version-control metadata
+/// and build output, which routinely hold credentials, tokens and the full
+/// history of a project.
 const SKIP_DIRS: &[&str] = &[".git", ".hg", ".svn", "target", "node_modules"];
+
+/// The one hidden path a static server is expected to hand out.
+const HIDDEN_ALLOWED: &[&str] = &[".well-known"];
+
+/// Whether a single path segment is off limits: a skipped directory, or any
+/// hidden (dot-prefixed) name outside the `.well-known` exception — `.env`,
+/// `.htpasswd`, `.npmrc` and friends.
+///
+/// The scanner and the router share this one rule on purpose. They used to
+/// disagree: the listing hid `.git`, but a request for `/.git/config` was
+/// still served. A name the listing will not show must not be reachable by
+/// typing its path either.
+pub fn is_forbidden_segment(name: &str) -> bool {
+    if HIDDEN_ALLOWED.contains(&name) {
+        return false;
+    }
+    name.starts_with('.') || SKIP_DIRS.contains(&name)
+}
 
 pub fn scan(root: &Path) -> io::Result<Vec<FileEntry>> {
     let mut out = Vec::new();
@@ -47,12 +68,13 @@ pub fn scan(root: &Path) -> io::Result<Vec<FileEntry>> {
 fn walk(root: &Path, dir: &Path, out: &mut Vec<FileEntry>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
+        // Not followed: `file_type` here does not resolve symlinks, so a link
+        // is neither a file nor a directory and falls out of the walk.
         let file_type = entry.file_type()?;
+        if is_forbidden_segment(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
         if file_type.is_dir() {
-            let name = entry.file_name();
-            if SKIP_DIRS.contains(&name.to_string_lossy().as_ref()) {
-                continue;
-            }
             walk(root, &entry.path(), out)?;
         } else if file_type.is_file() {
             let meta = entry.metadata()?;

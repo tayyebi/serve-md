@@ -5,16 +5,28 @@ use crate::mime;
 use crate::page;
 use crate::plugin;
 use crate::render;
-use crate::scanner::{scan, FileEntry, FileKind};
+use crate::scanner::{is_forbidden_segment, scan, FileEntry, FileKind};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+/// Ceilings on what a single client can spend of the server's resources.
+/// Each connection owns a thread, so without a cap on how many are live,
+/// how long one may dawdle over its request, and how long it may take to
+/// read the answer, opening sockets is enough to wedge the process.
 const MAX_HEADER: usize = 65_536;
+const MAX_HEADERS: usize = 128;
+const MAX_LIVE_CONNECTIONS: usize = 128;
+const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How much of one attacker-supplied field reaches a `--verbose` log line.
+const MAX_LOG_FIELD: usize = 512;
 
 struct Request {
     method: String,
@@ -30,6 +42,8 @@ struct Ctx {
     auth: Option<Auth>,
     verbose: bool,
     plugins: plugin::Set,
+    /// Connections currently being served, against `MAX_LIVE_CONNECTIONS`.
+    live: AtomicUsize,
 }
 
 pub fn serve(cfg: Config) -> io::Result<()> {
@@ -49,6 +63,7 @@ fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
         auth,
         verbose: cfg.verbose,
         plugins: cfg.plugins,
+        live: AtomicUsize::new(0),
     });
 
     let addr = listener.local_addr()?;
@@ -76,9 +91,15 @@ fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
         let Ok(mut s) = stream else {
             continue;
         };
+        if ctx.live.fetch_add(1, Ordering::AcqRel) >= MAX_LIVE_CONNECTIONS {
+            ctx.live.fetch_sub(1, Ordering::AcqRel);
+            let _ = refuse_busy(&mut s);
+            continue;
+        }
         let c = Arc::clone(&ctx);
         thread::spawn(move || {
             let _ = handle_connection(&mut s, &c);
+            c.live.fetch_sub(1, Ordering::AcqRel);
         });
     }
     Ok(())
@@ -94,7 +115,8 @@ fn open_browser(url: &str) {
 }
 
 fn handle_connection(stream: &mut TcpStream, ctx: &Ctx) -> io::Result<()> {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     let _ = stream.set_nodelay(true);
 
     let Some(req) = read_request(stream)? else {
@@ -172,11 +194,24 @@ fn route(
             );
         }
     };
-    if decoded.starts_with('/') {
-        let canonical = canonical_path(&ctx.dir, &decoded);
-        if canonical != decoded {
-            return redirect(stream, &canonical, query, is_head);
-        }
+    // Origin-form only. A target that is not a rooted path — absolute-form
+    // `http://host/x`, authority-form, `*` — is not something this server
+    // routes, and letting one fall through to path resolution only widens
+    // what the checks below have to hold for.
+    if !decoded.starts_with('/') {
+        return respond(
+            stream,
+            400,
+            "Bad Request",
+            "text/plain; charset=utf-8",
+            b"400 Bad Request\n",
+            &[],
+            is_head,
+        );
+    }
+    let canonical = canonical_path(&ctx.dir, &decoded);
+    if canonical != decoded {
+        return redirect(stream, &canonical, query, is_head);
     }
     let rel = decoded.strip_prefix('/').unwrap_or(&decoded);
 
@@ -227,11 +262,10 @@ fn serve_file(
     is_head: bool,
 ) -> io::Result<()> {
     if kind == FileKind::Static {
-        let bytes = match fs::read(full) {
-            Ok(b) => b,
-            Err(_) => return not_found(stream, terminal, is_head),
-        };
-        return respond(stream, 200, "OK", mime::guess(full), &bytes, &[], is_head);
+        if stream_file(stream, full, mime::guess(full), is_head)? {
+            return Ok(());
+        }
+        return not_found(stream, terminal, is_head);
     }
 
     let src = match fs::read_to_string(full) {
@@ -285,6 +319,39 @@ fn serve_file(
         &[],
         is_head,
     )
+}
+
+/// Streams a file from disk to the socket instead of buffering it in memory
+/// first: a request for a large asset must not cost the server that asset's
+/// size in RAM, and it never has to, since `Content-Length` can come from
+/// the same handle the bytes do.
+///
+/// `Ok(false)` means nothing has been written yet and the caller should
+/// answer 404 — once the head goes out it is too late to change the status.
+fn stream_file(
+    stream: &mut TcpStream,
+    full: &Path,
+    ctype: &str,
+    is_head: bool,
+) -> io::Result<bool> {
+    let Ok(file) = fs::File::open(full) else {
+        return Ok(false);
+    };
+    let Ok(meta) = file.metadata() else {
+        return Ok(false);
+    };
+    if !meta.is_file() {
+        return Ok(false);
+    }
+    let len = meta.len();
+    write_head(stream, 200, "OK", ctype, len, &[])?;
+    if !is_head {
+        // Capped at the length just announced: if the file grows underneath
+        // us mid-copy, the body still matches its own Content-Length.
+        io::copy(&mut file.take(len), stream)?;
+    }
+    stream.flush()?;
+    Ok(true)
 }
 
 fn display_rel(root: &Path, full: &Path) -> String {
@@ -408,34 +475,86 @@ enum Resolved {
     NotFound,
 }
 
+/// Hard caps on the shape of a request path, so a pathological URL cannot
+/// make the server walk an unbounded amount of it before saying no.
+const MAX_PATH_LEN: usize = 4096;
+const MAX_PATH_DEPTH: usize = 64;
+
+/// Vets one decoded request path and builds the path it names under `root`.
+///
+/// Everything here is a filter on the request *string*, applied before the
+/// filesystem is touched at all. A segment has to be one plain file name:
+/// control bytes (NUL included), backslashes, `.`, `..`, hidden and skipped
+/// names, and anything that is not a `Normal` component — a Windows drive
+/// letter, a UNC or verbatim prefix, an absolute segment, each of which
+/// would otherwise *replace* the root outright when joined — are all
+/// refused. The canonicalize-and-contain check in `resolve` is the second
+/// line of defence behind this, not the first.
+fn safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
+    let trimmed = rel.trim_end_matches('/');
+    if trimmed.len() > MAX_PATH_LEN || trimmed.contains('\\') {
+        return None;
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    let mut out = root.to_path_buf();
+    if trimmed.is_empty() {
+        return Some(out);
+    }
+    if trimmed.split('/').count() > MAX_PATH_DEPTH {
+        return None;
+    }
+    for seg in trimmed.split('/') {
+        if seg.is_empty() || is_forbidden_segment(seg) {
+            return None;
+        }
+        let mut comps = Path::new(seg).components();
+        match (comps.next(), comps.next()) {
+            (Some(Component::Normal(name)), None) if name.to_str() == Some(seg) => out.push(name),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Whether a path that already resolved inside `root` still lands on a name
+/// the server refuses to serve.
+///
+/// `safe_join` vets what the *request* spelled; this vets where the request
+/// actually landed. They differ whenever a symlink is involved: `docs/link`
+/// pointing at `../.git` spells nothing forbidden, but `/docs/link/config`
+/// would hand out the repository all the same.
+fn lands_on_forbidden(root: &Path, full: &Path) -> bool {
+    let Ok(rel) = full.strip_prefix(root) else {
+        return true;
+    };
+    rel.components().any(|c| match c {
+        Component::Normal(name) => is_forbidden_segment(&name.to_string_lossy()),
+        Component::CurDir => false,
+        _ => true,
+    })
+}
+
 /// Resolves a percent-decoded, leading-slash-stripped request path to a file
 /// under `root`. A path that names a directory (including the served root
 /// itself) falls back to `index.html`, then `index.md`, inside it; if
 /// neither exists, the caller should show the full-tree listing page.
+///
+/// Every exit is the same `NotFound` the caller renders as a plain 404:
+/// refusing to serve a path and not having it look identical from outside,
+/// so the router never confirms that a file it will not hand over exists.
 fn resolve(root: &Path, rel: &str) -> Resolved {
-    let trimmed = rel.trim_end_matches('/');
-    if trimmed.contains('\\') {
-        return Resolved::NotFound;
-    }
-    if !trimmed.is_empty() {
-        for seg in trimmed.split('/') {
-            if seg.is_empty() || seg == "." || seg == ".." {
-                return Resolved::NotFound;
-            }
-        }
-    }
     let Ok(root_c) = root.canonicalize() else {
         return Resolved::NotFound;
     };
-    let candidate = if trimmed.is_empty() {
-        root_c.clone()
-    } else {
-        root_c.join(trimmed)
+    let Some(candidate) = safe_join(&root_c, rel) else {
+        return Resolved::NotFound;
     };
     let Ok(cand_c) = candidate.canonicalize() else {
         return Resolved::NotFound;
     };
-    if !cand_c.starts_with(&root_c) {
+    if !cand_c.starts_with(&root_c) || lands_on_forbidden(&root_c, &cand_c) {
         return Resolved::NotFound;
     }
     let Ok(meta) = fs::metadata(&cand_c) else {
@@ -449,7 +568,9 @@ fn resolve(root: &Path, rel: &str) -> Resolved {
         for name in INDEX_CANDIDATES {
             let idx = cand_c.join(name);
             let valid = idx.canonicalize().ok().filter(|idx_c| {
-                idx_c.starts_with(&root_c) && fs::metadata(idx_c).map(|m| m.is_file()).unwrap_or(false)
+                idx_c.starts_with(&root_c)
+                    && !lands_on_forbidden(&root_c, idx_c)
+                    && fs::metadata(idx_c).map(|m| m.is_file()).unwrap_or(false)
             });
             if let Some(idx_c) = valid {
                 let kind = FileKind::from_path(&idx_c);
@@ -476,6 +597,7 @@ fn accept_wants(accept: &str, wanted: &str) -> bool {
 fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
     let mut buf = Vec::with_capacity(1024);
     let mut tmp = [0u8; 4096];
+    let start = Instant::now();
     loop {
         let n = stream.read(&mut tmp)?;
         if n == 0 {
@@ -486,6 +608,15 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "request headers too large",
+            ));
+        }
+        // The socket's read timeout does not bound this on its own: a client
+        // dribbling one byte at a time restarts it on every read and would
+        // otherwise hold the thread indefinitely.
+        if start.elapsed() > HEAD_TIMEOUT {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "request headers too slow",
             ));
         }
         if has_header_end(&buf) {
@@ -506,6 +637,15 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
     let mut headers: Vec<(String, String)> = Vec::new();
     for line in lines {
         if let Some(ci) = line.find(':') {
+            // Dropping the excess instead would fail open in the wrong
+            // direction — a request could bury its Authorization header past
+            // the cap — so an over-long header list ends the connection.
+            if headers.len() >= MAX_HEADERS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "too many request headers",
+                ));
+            }
             headers.push((line[..ci].trim().to_string(), line[ci + 1..].trim().to_string()));
         }
     }
@@ -537,15 +677,35 @@ fn verbose_log(req: &Request, terminal: bool, ctx: &Ctx) {
         return;
     }
     let mut line = String::new();
-    line.push_str(&format!("{} {} ", req.method, req.target));
+    line.push_str(&format!(
+        "{} {} ",
+        log_safe(&req.method),
+        log_safe(&req.target)
+    ));
     let wrapped = wrap_text(&line, 80);
     println!("[verbose] request: {}", wrapped);
     for (k, v) in &req.headers {
-        println!("[verbose]   {}: {}", k, v);
+        println!("[verbose]   {}: {}", log_safe(k), log_safe(v));
     }
-    println!("[verbose]   user-agent: {}", req.ua);
+    println!("[verbose]   user-agent: {}", log_safe(&req.ua));
     println!("[verbose]   terminal: {}", terminal);
     println!("[verbose]   auth: {}", ctx.auth.is_some());
+}
+
+/// Renders one field of a request for the operator's terminal. The text is
+/// entirely attacker-controlled, so control bytes are replaced rather than
+/// printed: otherwise a crafted header could move the cursor, repaint the
+/// screen, or forge whole log lines with ANSI escapes and newlines.
+fn log_safe(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .take(MAX_LOG_FIELD)
+        .map(|c| if c.is_control() { '\u{fffd}' } else { c })
+        .collect();
+    if s.chars().nth(MAX_LOG_FIELD).is_some() {
+        out.push('…');
+    }
+    out
 }
 
 fn wrap_text(s: &str, max_width: usize) -> String {
@@ -574,7 +734,7 @@ fn write_head(
     status: u16,
     reason: &str,
     ctype: &str,
-    len: usize,
+    len: u64,
     extra: &[(&str, &str)],
 ) -> io::Result<()> {
     let mut head = format!(
@@ -591,6 +751,22 @@ fn write_head(
     stream.write_all(head.as_bytes())
 }
 
+/// Turns a connection away when the server is already at its ceiling. Best
+/// effort, on a short timeout: this runs on the accept loop, so a client
+/// that never reads its 503 must not be able to stall the ones behind it.
+fn refuse_busy(stream: &mut TcpStream) -> io::Result<()> {
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    respond(
+        stream,
+        503,
+        "Service Unavailable",
+        "text/plain; charset=utf-8",
+        b"503 Service Unavailable\n",
+        &[("Retry-After", "1")],
+        false,
+    )
+}
+
 fn respond(
     stream: &mut TcpStream,
     status: u16,
@@ -600,7 +776,7 @@ fn respond(
     extra: &[(&str, &str)],
     is_head: bool,
 ) -> io::Result<()> {
-    write_head(stream, status, reason, ctype, body.len(), extra)?;
+    write_head(stream, status, reason, ctype, body.len() as u64, extra)?;
     if !is_head {
         stream.write_all(body)?;
     }
@@ -954,6 +1130,176 @@ mod tests {
         assert_eq!(status, 200);
         assert!(ct.contains("text/html"));
         assert!(body.contains("docs/b.md"));
+    }
+
+    #[test]
+    fn hidden_and_vcs_paths_are_never_served() {
+        let dir = setup();
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".git").join("config"), "[core]\n").unwrap();
+        fs::write(dir.join(".env"), "SECRET=1\n").unwrap();
+        fs::create_dir_all(dir.join("node_modules")).unwrap();
+        fs::write(dir.join("node_modules").join("pkg.md"), "# pkg\n").unwrap();
+        fs::write(dir.join("docs").join(".secret.md"), "# secret\n").unwrap();
+        let addr = start_server(dir, None, None);
+
+        for path in [
+            "/.git/config",
+            "/.env",
+            "/node_modules/pkg.md",
+            "/docs/.secret.md",
+        ] {
+            let (status, _, _) = http_get(addr, path, "test-agent", None);
+            assert_eq!(status, 404, "path: {path}");
+        }
+
+        // The listing hid these all along; now the router agrees.
+        let (_, body, _) = http_get(addr, "/", "test-agent", None);
+        assert!(!body.contains(".env"), "{body}");
+        assert!(!body.contains("pkg.md"), "{body}");
+        assert!(!body.contains(".secret.md"), "{body}");
+    }
+
+    #[test]
+    fn well_known_stays_reachable() {
+        let dir = setup();
+        fs::create_dir_all(dir.join(".well-known")).unwrap();
+        fs::write(
+            dir.join(".well-known").join("security.txt"),
+            "Contact: mailto:x@example.com\n",
+        )
+        .unwrap();
+        let addr = start_server(dir, None, None);
+
+        let (status, body, _) = http_get(addr, "/.well-known/security.txt", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(body.contains("Contact:"), "{body}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_cannot_smuggle_a_path_out_or_back_in() {
+        use std::os::unix::fs::symlink;
+        let dir = setup();
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".git").join("config"), "[core]\n").unwrap();
+        // Spells nothing forbidden, lands somewhere forbidden.
+        symlink(dir.join(".git"), dir.join("link")).unwrap();
+        // Lands outside the served tree entirely.
+        symlink("/etc/passwd", dir.join("passwd.md")).unwrap();
+        let addr = start_server(dir, None, None);
+
+        for path in ["/link/config", "/link", "/passwd.md"] {
+            let (status, _, _) = http_get(addr, path, "test-agent", None);
+            assert_eq!(status, 404, "path: {path}");
+        }
+    }
+
+    #[test]
+    fn pathological_paths_are_rejected() {
+        let addr = start_server(setup(), None, None);
+        let deep = format!("/{}", ["a"; 100].join("/"));
+        let long = format!("/{}.md", "a".repeat(5000));
+        for path in [
+            deep.as_str(),
+            long.as_str(),
+            "/a%01.md",  // control byte
+            "/a%0A.md",  // newline
+            "/a%00.md",  // NUL
+        ] {
+            let (status, _, _) = http_get(addr, path, "test-agent", None);
+            assert_eq!(status, 404, "path: {path}");
+        }
+    }
+
+    #[test]
+    fn non_origin_form_targets_are_refused() {
+        let addr = start_server(setup(), None, None);
+        for target in ["http://example.com/a.md", "a.md", "*"] {
+            let (status, _, _) = http_get(addr, target, "test-agent", None);
+            assert_eq!(status, 400, "target: {target}");
+        }
+    }
+
+    #[test]
+    fn static_files_stream_with_an_exact_length() {
+        let dir = setup();
+        let big = vec![b'x'; 300 * 1024];
+        fs::write(dir.join("big.bin"), &big).unwrap();
+        let addr = start_server(dir, None, None);
+
+        let (status, resp, ct) = http_get(addr, "/big.bin", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(ct.contains("application/octet-stream"));
+        assert!(
+            resp.contains(&format!("Content-Length: {}", big.len())),
+            "no matching Content-Length"
+        );
+        assert!(resp.ends_with(&"x".repeat(64)));
+
+        // HEAD announces the same length without reading the file out.
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(b"HEAD /big.bin HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut resp = String::new();
+        let _ = s.read_to_string(&mut resp);
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        assert!(resp.contains(&format!("Content-Length: {}", big.len())), "{resp}");
+        assert!(resp.ends_with("\r\n\r\n"), "{resp}");
+    }
+
+    #[test]
+    fn too_many_headers_ends_the_connection() {
+        let addr = start_server(setup(), None, None);
+        let mut s = TcpStream::connect(addr).unwrap();
+        let mut req = String::from("GET /a.md HTTP/1.1\r\nHost: localhost\r\n");
+        for i in 0..(MAX_HEADERS + 10) {
+            req.push_str(&format!("X-Pad-{i}: v\r\n"));
+        }
+        req.push_str("\r\n");
+        let _ = s.write_all(req.as_bytes());
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut resp = String::new();
+        let _ = s.read_to_string(&mut resp);
+        assert!(resp.is_empty(), "{resp}");
+    }
+
+    #[test]
+    fn safe_join_refuses_anything_but_plain_names() {
+        let root = tmp_dir("join");
+        for bad in [
+            "..",
+            "a/../b",
+            ".",
+            "./a",
+            ".git/config",
+            ".env",
+            "a\\b",
+            "a\0b",
+            "a//b",
+        ] {
+            assert!(safe_join(&root, bad).is_none(), "accepted: {bad:?}");
+        }
+        assert!(safe_join(&root, &"a/".repeat(MAX_PATH_DEPTH + 1)).is_none());
+        assert!(safe_join(&root, &"a".repeat(MAX_PATH_LEN + 1)).is_none());
+
+        assert_eq!(safe_join(&root, "").unwrap(), root);
+        assert_eq!(safe_join(&root, "a/b.md").unwrap(), root.join("a/b.md"));
+        assert_eq!(
+            safe_join(&root, ".well-known/x").unwrap(),
+            root.join(".well-known/x")
+        );
+    }
+
+    #[test]
+    fn log_fields_lose_their_control_bytes() {
+        let out = log_safe("GET /a\u{1b}[2Jb\nc");
+        assert!(!out.contains('\u{1b}'), "{out}");
+        assert!(!out.contains('\n'), "{out}");
+        assert!(out.contains("[2Jb"), "{out}");
+        assert!(!log_safe("short").ends_with('…'));
+        assert!(log_safe(&"a".repeat(MAX_LOG_FIELD + 1)).ends_with('…'));
     }
 
     #[test]
