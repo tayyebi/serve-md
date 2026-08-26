@@ -460,4 +460,232 @@ mod tests {
         let out = ascii("mass energy $E = mc^2$ here\n");
         assert!(out.contains("$E = mc^2$"), "{out}");
     }
+
+    #[test]
+    fn renders_inline_code_and_strikethrough() {
+        let out = ascii("use `cargo test`, not ~~make~~.\n");
+        assert!(out.contains("`cargo test`"), "{out}");
+        assert!(out.contains("~~make~~"), "{out}");
+    }
+
+    #[test]
+    fn renders_images_with_alt_text() {
+        assert!(ascii("![Alt](a.png)\n").contains("[image: Alt] (a.png)"));
+        assert!(ascii("![](a.png)\n").contains("[image] (a.png)"));
+    }
+
+    #[test]
+    fn autolinked_url_is_not_repeated() {
+        let out = ascii("see https://example.com now\n");
+        assert_eq!(out.matches("https://example.com").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn renders_thematic_break_as_a_rule() {
+        let out = ascii("a\n\n---\n\nb\n");
+        assert!(out.lines().any(|l| l.chars().all(|c| c == '-') && l.len() >= 3), "{out}");
+    }
+
+    #[test]
+    fn ordered_list_honours_start_and_delimiter() {
+        assert!(ascii("5. five\n6. six\n").contains("5. five"));
+        assert!(ascii("1) first\n").contains("1) first"));
+    }
+
+    #[test]
+    fn nested_blockquotes_nest_their_markers() {
+        let out = ascii("> outer\n>\n> > inner\n");
+        assert!(out.contains("> outer"), "{out}");
+        assert!(out.contains("> > inner"), "{out}");
+    }
+
+    #[test]
+    fn html_blocks_are_stripped_to_their_text() {
+        let out = ascii("<div class=\"x\">hello</div>\n");
+        assert!(out.contains("hello"), "{out}");
+        assert!(!out.contains('<'), "{out}");
+        assert!(!out.contains("class"), "{out}");
+    }
+
+    #[test]
+    fn soft_breaks_join_into_one_paragraph() {
+        let out = ascii("one\ntwo\n");
+        assert!(out.contains("one two"), "{out}");
+    }
+
+    #[test]
+    fn code_blocks_keep_their_inner_indentation() {
+        let out = ascii("```\nif x:\n    y()\n```\n");
+        assert!(out.contains("    if x:"), "{out}");
+        assert!(out.contains("        y()"), "{out}");
+    }
+
+    #[test]
+    fn table_columns_align_per_the_delimiter_row() {
+        let out = ascii("| L | R |\n|:--|--:|\n| a | b |\n");
+        assert!(out.contains("| a  "), "{out}");
+        assert!(out.contains("  b |"), "{out}");
+    }
+
+    #[test]
+    fn empty_input_renders_a_single_newline() {
+        assert_eq!(ascii(""), "\n");
+    }
+
+    // ------------------------------------------------ markdown -> txt edges
+
+    #[test]
+    fn heading_underline_matches_the_longest_line() {
+        let out = ascii("# Title\n");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "TITLE");
+        assert_eq!(lines[1], "=====");
+        let sub = ascii("## Sub\n");
+        assert_eq!(sub.lines().nth(1), Some("---"));
+    }
+
+    #[test]
+    fn deep_headings_use_hash_markers() {
+        assert!(ascii("### Third\n").contains("### Third"));
+        assert!(ascii("###### Sixth\n").contains("###### Sixth"));
+        // Level 3+ is not underlined.
+        assert!(!ascii("### Third\n").contains("==="));
+    }
+
+    #[test]
+    fn setext_and_atx_headings_render_the_same() {
+        assert_eq!(ascii("Title\n=====\n"), ascii("# Title\n"));
+    }
+
+    #[test]
+    fn thematic_break_is_clamped_to_seventy_two_dashes() {
+        let out = ascii("a\n\n---\n\nb\n");
+        assert!(out.lines().any(|l| l == "-".repeat(72)), "{out}");
+    }
+
+    #[test]
+    fn nested_lists_are_indented_under_their_parent() {
+        let out = ascii("- one\n  - inner\n    - deepest\n");
+        assert!(out.contains("- one"), "{out}");
+        assert!(out.contains("  - inner"), "{out}");
+        assert!(out.contains("    - deepest"), "{out}");
+    }
+
+    #[test]
+    fn ordered_list_continuation_lines_hang_under_the_marker() {
+        let long = "x".repeat(20) + " " + &"y".repeat(20) + " " + &"z".repeat(60);
+        let out = ascii(&format!("1. {long}\n"));
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].starts_with("1. "), "{out}");
+        assert!(lines.len() > 1, "should wrap: {out}");
+        assert!(lines[1].starts_with("   ") && !lines[1].starts_with("    "), "{out}");
+    }
+
+    #[test]
+    fn loose_lists_get_a_blank_line_between_items() {
+        let loose = ascii("- a\n\n- b\n");
+        assert!(loose.contains("- a\n\n- b"), "{loose:?}");
+        let tight = ascii("- a\n- b\n");
+        assert!(tight.contains("- a\n- b"), "{tight:?}");
+    }
+
+    #[test]
+    fn a_list_inside_a_blockquote_keeps_both_markers() {
+        let out = ascii("> - a\n> - b\n");
+        assert!(out.contains("> - a"), "{out}");
+        assert!(out.contains("> - b"), "{out}");
+    }
+
+    #[test]
+    fn blockquotes_wrap_inside_their_narrowed_width() {
+        let out = ascii(&format!("> {}\n", "word ".repeat(40)));
+        assert!(out.lines().all(|l| l.starts_with("> ")), "{out}");
+        assert!(out.lines().all(|l| l.chars().count() <= WIDTH), "{out}");
+    }
+
+    #[test]
+    fn code_blocks_are_never_wrapped() {
+        let long = "x".repeat(200);
+        let out = ascii(&format!("```\n{long}\n```\n"));
+        assert!(out.contains(&format!("    {long}")), "{out}");
+    }
+
+    #[test]
+    fn a_ragged_table_row_is_padded_out() {
+        let out = ascii("| A | B |\n|---|---|\n| 1 |\n");
+        // Every rendered row spans both columns.
+        for line in out.lines().filter(|l| l.starts_with('|')) {
+            assert_eq!(line.matches('|').count(), 3, "{out}");
+        }
+    }
+
+    #[test]
+    fn wide_table_cells_wrap_rather_than_overflow() {
+        let cell = "long ".repeat(20);
+        let out = ascii(&format!("| A | B |\n|---|---|\n| {cell} | 2 |\n"));
+        assert!(out.lines().all(|l| l.chars().count() <= WIDTH + 4), "{out}");
+        assert!(out.lines().filter(|l| l.starts_with('|')).count() > 2, "{out}");
+    }
+
+    #[test]
+    fn hard_breaks_become_spaces() {
+        assert!(ascii("one  \ntwo\n").contains("one two"));
+        assert!(ascii("one\\\ntwo\n").contains("one two"));
+    }
+
+    #[test]
+    fn nested_emphasis_keeps_both_markers() {
+        assert!(ascii("***both***\n").contains("***both***"));
+    }
+
+    #[test]
+    fn an_image_inside_a_link_renders_both_targets() {
+        let out = ascii("[![Alt](i.png)](https://example.com)\n");
+        assert!(out.contains("[image: Alt] (i.png)"), "{out}");
+        assert!(out.contains("(https://example.com)"), "{out}");
+    }
+
+    #[test]
+    fn inline_html_is_stripped_but_its_text_kept() {
+        let out = ascii("text <b>bold</b> here\n");
+        assert!(out.contains("text bold here"), "{out}");
+        assert!(!out.contains('<'), "{out}");
+    }
+
+    #[test]
+    fn non_ascii_text_survives_intact() {
+        let out = ascii("caf\u{e9} \u{2014} \u{6f22}\u{5b57} \u{1f600}\n");
+        assert!(out.contains("caf\u{e9}"), "{out}");
+        assert!(out.contains("\u{6f22}\u{5b57}"), "{out}");
+        assert!(out.contains("\u{1f600}"), "{out}");
+    }
+
+    #[test]
+    fn wrapping_counts_characters_not_bytes() {
+        // Multi-byte words must not make lines wrap early.
+        let out = ascii(&"caf\u{e9} ".repeat(30));
+        let widest = out.lines().map(|l| l.chars().count()).max().unwrap();
+        assert!(widest <= WIDTH, "{widest} > {WIDTH}");
+        assert!(widest > WIDTH - 6, "wrapped too early at {widest}: {out}");
+    }
+
+    #[test]
+    fn an_over_long_word_is_left_whole() {
+        let word = "x".repeat(120);
+        let out = ascii(&format!("{word}\n"));
+        assert!(out.contains(&word), "a word must never be split: {out}");
+    }
+
+    #[test]
+    fn blank_and_whitespace_only_documents_render_cleanly() {
+        assert_eq!(ascii("   \n\n  \n"), "\n");
+        assert_eq!(ascii("\n\n\n"), "\n");
+    }
+
+    #[test]
+    fn output_never_contains_tabs_or_trailing_blank_lines() {
+        let out = ascii("# Title\n\nBody with a [link](https://example.com).\n");
+        assert!(!out.contains('\t'), "{out}");
+        assert!(out.ends_with('\n') && !out.ends_with("\n\n"), "{out:?}");
+    }
 }

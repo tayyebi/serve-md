@@ -1130,6 +1130,77 @@ mod tests {
     }
 
     #[test]
+    fn a_mermaid_fence_may_carry_extra_info_words() {
+        let out = render("```mermaid theme\nflowchart TD\n  A --> B\n```\n");
+        assert!(out.contains("<svg"), "{out}");
+        // A language that merely starts with "mermaid" is not a diagram.
+        let other = render("```mermaidjs\nflowchart TD\n  A --> B\n```\n");
+        assert!(!other.contains("<svg"), "{other}");
+    }
+
+    #[test]
+    fn svg_carries_its_style_hook_and_accessibility_role() {
+        let out = svg("flowchart TD\n  A --> B");
+        assert!(out.contains("class=\"mmd\""), "{out}");
+        assert!(out.contains("role=\"img\""), "{out}");
+        assert!(out.contains("xmlns=\"http://www.w3.org/2000/svg\""), "{out}");
+    }
+
+    #[test]
+    fn a_header_without_a_direction_still_renders() {
+        assert!(svg("flowchart\n  A --> B").contains("<svg"));
+        // An unrecognised direction falls back rather than failing.
+        assert!(svg("flowchart XY\n  A --> B").contains("<svg"));
+    }
+
+    #[test]
+    fn unsupported_subgraph_blocks_are_ignored_not_fatal() {
+        let out = svg("flowchart TD\n  subgraph one\n  A --> B\n  end\n  B --> C");
+        assert!(out.contains("<svg"), "{out}");
+        assert_eq!(out.matches("<line class=").count(), 2, "{out}");
+        assert!(!out.contains(">one<"), "{out}");
+    }
+
+    #[test]
+    fn a_dangling_link_keeps_its_node_and_draws_no_edge() {
+        let out = svg("flowchart TD\n  A -->");
+        assert!(out.contains(">A<"), "{out}");
+        assert!(!out.contains("<line class="), "{out}");
+    }
+
+    #[test]
+    fn a_header_alone_is_not_a_diagram() {
+        // No nodes: leave the fence as a code block rather than emit an empty
+        // canvas.
+        let out = svg("flowchart TD");
+        assert!(!out.contains("<svg"), "{out}");
+        assert!(out.contains("language-mermaid"), "{out}");
+    }
+
+    #[test]
+    fn blank_lines_inside_a_diagram_are_skipped() {
+        let out = svg("flowchart TD\n\n  A --> B\n\n  B --> C\n");
+        assert_eq!(out.matches("<line class=").count(), 2, "{out}");
+    }
+
+    #[test]
+    fn style_covers_every_class_the_svg_emits() {
+        let out = svg("flowchart TD\n  A{Choice} -.->|Yes| B\n  A ==> C");
+        for class in ["\"n\"", "\"a\"", "\"lb\"", "e dash", "e thick"] {
+            assert!(out.contains(class), "missing {class}: {out}");
+        }
+        for token in [".mmd .n", ".mmd .e", ".mmd .a", ".mmd .lb", ".dash", ".thick"] {
+            assert!(STYLE.contains(token), "STYLE missing {token}");
+        }
+    }
+
+    #[test]
+    fn plugin_metadata_is_stable() {
+        assert_eq!(Mermaid.name(), "mermaid");
+        assert!(!Mermaid.describe().is_empty());
+    }
+
+    #[test]
     fn head_style_ships_only_when_a_diagram_rendered() {
         let set = Set::resolve(&["mermaid".to_string()]).unwrap();
         assert!(set.render_html("just prose\n").head.is_empty());

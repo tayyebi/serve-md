@@ -856,4 +856,343 @@ mod tests {
         assert!(!out.contains("<math"), "{out}");
         assert!(out.contains("$E = mc^2$"), "{out}");
     }
+
+    #[test]
+    fn empty_formulas_are_refused() {
+        assert!(to_mathml("", false).is_none());
+        assert!(to_mathml("   \n  ", false).is_none());
+    }
+
+    #[test]
+    fn a_math_fence_may_carry_extra_info_words() {
+        // comrak takes the first whitespace-delimited token as the language.
+        assert!(render("```math extra\nx^2\n```\n").contains("<math"));
+        // ...but a fence whose language merely starts with "math" is not one.
+        assert!(!render("```mathematica\nx^2\n```\n").contains("<math"));
+    }
+
+    #[test]
+    fn code_spans_and_other_fences_are_left_alone() {
+        let span = render("the literal `$E = mc^2$` here\n");
+        assert!(!span.contains("<math"), "{span}");
+        let fence = render("```rust\nlet cost = \"$5\";\n```\n");
+        assert!(!fence.contains("<math"), "{fence}");
+    }
+
+    #[test]
+    fn style_ships_once_however_many_formulas() {
+        let set = Set::resolve(&["math".to_string()]).unwrap();
+        let head = set.render_html("$a$ and $b$ and $$c$$\n").head;
+        assert_eq!(head.matches("<style>").count(), 1, "{head}");
+        assert!(head.contains("math{font-size"), "{head}");
+    }
+
+    #[test]
+    fn nested_structures_parse() {
+        assert!(ml("\\frac{x^2 + 1}{\\sqrt{y_i}}").contains("<mfrac>"));
+        assert!(ml("\\frac{x^2 + 1}{\\sqrt{y_i}}").contains("<msqrt>"));
+        assert!(ml("x^{y^{z}}").matches("<msup>").count() >= 2);
+    }
+
+    // ------------------------------------------------------ notation coverage
+
+    #[test]
+    fn numbers_group_digits_and_decimals() {
+        assert!(ml("3.14").contains("<mn>3.14</mn>"));
+        assert!(ml("1024").contains("<mn>1024</mn>"));
+        // A trailing dot is punctuation, not part of the number.
+        let out = ml("1.");
+        assert!(out.contains("<mn>1</mn>"), "{out}");
+        assert!(out.contains("<mo>.</mo>"), "{out}");
+    }
+
+    #[test]
+    fn identifiers_are_one_letter_each() {
+        let out = ml("xy");
+        assert!(out.contains("<mi>x</mi><mi>y</mi>"), "{out}");
+    }
+
+    #[test]
+    fn ascii_operators_get_typographic_glyphs() {
+        assert!(ml("a - b").contains('\u{2212}'), "minus, not hyphen");
+        assert!(ml("a * b").contains('\u{2217}'), "asterisk operator");
+        assert!(ml("a + b").contains("<mo>+</mo>"));
+        assert!(ml("a = b").contains("<mo>=</mo>"));
+    }
+
+    #[test]
+    fn primes_are_prime_glyphs() {
+        assert!(ml("f'").contains('\u{2032}'));
+        assert!(ml("\\prime").contains('\u{2032}'));
+    }
+
+    #[test]
+    fn fraction_aliases_agree() {
+        assert_eq!(ml("\\frac{a}{b}"), ml("\\dfrac{a}{b}"));
+        assert_eq!(ml("\\frac{a}{b}"), ml("\\tfrac{a}{b}"));
+        let out = ml("\\frac{a}{b}");
+        assert!(
+            out.contains("<mfrac><mrow><mi>a</mi></mrow><mrow><mi>b</mi></mrow></mfrac>"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn roots_put_the_radicand_before_the_index() {
+        let out = ml("\\sqrt[3]{x}");
+        assert!(
+            out.contains("<mroot><mrow><mi>x</mi></mrow><mn>3</mn></mroot>"),
+            "{out}"
+        );
+        assert!(ml("\\sqrt[n]{x}").contains("<mi>n</mi>"));
+        // A root index that is not a bare number or word is refused.
+        assert!(to_mathml("\\sqrt[a+b]{x}", false).is_none());
+    }
+
+    #[test]
+    fn text_command_aliases_all_produce_mtext() {
+        for cmd in ["text", "textrm", "textnormal", "mbox"] {
+            let out = ml(&format!("\\{cmd}{{if x}}"));
+            assert!(out.contains("<mtext>if x</mtext>"), "{cmd}: {out}");
+        }
+        // Braces inside a text run stay balanced and uninterpreted.
+        assert!(ml("\\text{a {b} c}").contains("<mtext>a {b} c</mtext>"));
+    }
+
+    #[test]
+    fn every_font_variant_maps() {
+        for (cmd, variant) in [
+            ("mathrm", "normal"),
+            ("mathbf", "bold"),
+            ("boldsymbol", "bold"),
+            ("mathit", "italic"),
+            ("mathbb", "double-struck"),
+            ("mathcal", "script"),
+            ("mathsf", "sans-serif"),
+            ("mathtt", "monospace"),
+            ("mathfrak", "fraktur"),
+        ] {
+            let out = ml(&format!("\\{cmd}{{A}}"));
+            assert!(out.contains(&format!("mathvariant=\"{variant}\"")), "{cmd}: {out}");
+        }
+    }
+
+    #[test]
+    fn spacing_commands_emit_mspace() {
+        for cmd in ["\\,", "\\:", "\\;", "\\>"] {
+            assert!(ml(&format!("a{cmd}b")).contains("<mspace width=\"0.22em\"/>"), "{cmd}");
+        }
+        assert!(ml("a\\!b").contains("width=\"-0.17em\""));
+        assert!(ml("a\\quad b").contains("width=\"1em\""));
+        assert!(ml("a\\qquad b").contains("width=\"2em\""));
+        assert!(ml("a\\ b").contains("width=\"0.25em\""));
+    }
+
+    #[test]
+    fn escaped_literals_render_as_operators() {
+        assert!(ml("\\{x\\}").contains("<mo>{</mo>"));
+        assert!(ml("\\{x\\}").contains("<mo>}</mo>"));
+        assert!(ml("50\\%").contains("<mo>%</mo>"));
+        assert!(ml("\\$5").contains("<mo>$</mo>"));
+        assert!(ml("a\\#b").contains("<mo>#</mo>"));
+        assert!(ml("a\\_b").contains("<mo>_</mo>"));
+        // An escaped ampersand must not reach the page raw.
+        let amp = ml("a\\&b");
+        assert!(amp.contains("&amp;") && !amp.contains("<mo>&<"), "{amp}");
+    }
+
+    #[test]
+    fn stretchy_delimiter_pairs() {
+        for (open, close, glyph) in [
+            ("(", ")", ")"),
+            ("[", "]", "]"),
+            ("\\{", "\\}", "}"),
+            ("|", "|", "|"),
+            ("\\langle", "\\rangle", "\u{27e9}"),
+            ("\\lceil", "\\rceil", "\u{2309}"),
+            ("\\lfloor", "\\rfloor", "\u{230b}"),
+        ] {
+            let out = ml(&format!("\\left{open} x \\right{close}"));
+            assert_eq!(out.matches("stretchy=\"true\"").count(), 2, "{open}{close}: {out}");
+            assert!(out.contains(glyph), "{open}{close}: {out}");
+        }
+        // `\left.` is deliberately invisible, so only one delimiter is drawn.
+        let half = ml("\\left. x \\right|");
+        assert_eq!(half.matches("stretchy=\"true\"").count(), 1, "{half}");
+    }
+
+    #[test]
+    fn big_operators_are_marked_as_large() {
+        for cmd in ["sum", "prod", "int", "oint", "bigcup", "bigwedge", "coprod"] {
+            let out = ml(&format!("\\{cmd}"));
+            assert!(out.contains("largeop=\"true\""), "{cmd}: {out}");
+        }
+        // An ordinary relation is not a big operator.
+        assert!(!ml("\\leq").contains("largeop"));
+    }
+
+    #[test]
+    fn limit_style_functions_stack_in_display_mode() {
+        for cmd in ["lim", "max", "min", "sup", "inf", "limsup", "liminf"] {
+            let src = format!("\\{cmd}_{{n}} a");
+            assert!(to_mathml(&src, true).unwrap().contains("<munder>"), "{cmd} display");
+            assert!(to_mathml(&src, false).unwrap().contains("<msub>"), "{cmd} inline");
+        }
+    }
+
+    #[test]
+    fn functions_stay_upright() {
+        for cmd in [
+            "sin", "cos", "tan", "sec", "csc", "cot", "arcsin", "arccos", "arctan", "sinh",
+            "cosh", "tanh", "coth", "log", "ln", "lg", "exp", "det", "dim", "ker", "deg",
+            "gcd", "hom", "arg", "Pr",
+        ] {
+            let out = ml(&format!("\\{cmd} x"));
+            assert!(out.contains(&format!("<mi>{cmd}</mi>")), "{cmd}: {out}");
+        }
+    }
+
+    #[test]
+    fn greek_variants_are_distinct_glyphs() {
+        assert_ne!(ml("\\phi"), ml("\\varphi"));
+        assert_ne!(ml("\\epsilon"), ml("\\varepsilon"));
+        assert_ne!(ml("\\theta"), ml("\\vartheta"));
+        assert_ne!(ml("\\sigma"), ml("\\varsigma"));
+        // Upper and lower case are different letters.
+        assert!(ml("\\Omega").contains('\u{3a9}'));
+        assert!(ml("\\omega").contains('\u{3c9}'));
+        assert!(ml("\\Delta").contains('\u{394}'));
+        assert!(ml("\\delta").contains('\u{3b4}'));
+    }
+
+    #[test]
+    fn command_synonyms_render_identically() {
+        for (a, b) in [
+            ("\\leq", "\\le"),
+            ("\\geq", "\\ge"),
+            ("\\neq", "\\ne"),
+            ("\\to", "\\rightarrow"),
+            ("\\gets", "\\leftarrow"),
+            ("\\iff", "\\Leftrightarrow"),
+            ("\\land", "\\wedge"),
+            ("\\lor", "\\vee"),
+            ("\\lnot", "\\neg"),
+            ("\\varnothing", "\\emptyset"),
+            ("\\dots", "\\ldots"),
+        ] {
+            assert_eq!(ml(a), ml(b), "{a} and {b} should agree");
+        }
+    }
+
+    #[test]
+    fn set_theory_logic_and_arrow_symbols() {
+        for (cmd, glyph) in [
+            ("\\in", '\u{2208}'),
+            ("\\notin", '\u{2209}'),
+            ("\\subseteq", '\u{2286}'),
+            ("\\cup", '\u{222a}'),
+            ("\\cap", '\u{2229}'),
+            ("\\setminus", '\u{2216}'),
+            ("\\forall", '\u{2200}'),
+            ("\\exists", '\u{2203}'),
+            ("\\nexists", '\u{2204}'),
+            ("\\implies", '\u{21d2}'),
+            ("\\mapsto", '\u{21a6}'),
+            ("\\longrightarrow", '\u{27f6}'),
+            ("\\approx", '\u{2248}'),
+            ("\\equiv", '\u{2261}'),
+            ("\\propto", '\u{221d}'),
+            ("\\perp", '\u{22a5}'),
+            ("\\partial", '\u{2202}'),
+            ("\\nabla", '\u{2207}'),
+            ("\\aleph", '\u{2135}'),
+            ("\\hbar", '\u{210f}'),
+            ("\\cdots", '\u{22ef}'),
+            ("\\therefore", '\u{2234}'),
+        ] {
+            assert!(ml(cmd).contains(glyph), "{cmd} should render {glyph}");
+        }
+    }
+
+    #[test]
+    fn blackboard_number_set_shorthands() {
+        for (cmd, glyph) in [
+            ("\\N", '\u{2115}'),
+            ("\\Z", '\u{2124}'),
+            ("\\Q", '\u{211a}'),
+            ("\\R", '\u{211d}'),
+            ("\\C", '\u{2102}'),
+        ] {
+            assert!(ml(cmd).contains(glyph), "{cmd}: missing {glyph}");
+        }
+    }
+
+    #[test]
+    fn real_world_formulas_all_parse() {
+        for latex in [
+            "x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}",
+            "e^{i\\pi} + 1 = 0",
+            "\\int_0^\\infty e^{-x^2}\\,dx = \\frac{\\sqrt{\\pi}}{2}",
+            "P(A \\mid B) = \\frac{P(B \\mid A)\\,P(A)}{P(B)}",
+            "\\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}",
+            "f'(x) = \\lim_{h \\to 0} \\frac{f(x+h) - f(x)}{h}",
+            "\\forall \\varepsilon > 0, \\exists \\delta > 0",
+            "\\left( \\frac{a}{b} \\right)^{n}",
+            "\\mathbb{R}^{n \\times m}",
+            "\\log_2 n \\leq \\log_2 m",
+            "A \\cup B \\cap C \\setminus D",
+            "\\hbar \\frac{\\partial \\psi}{\\partial t}",
+            "\\lim_{x \\to \\infty} \\frac{1}{x} = 0",
+            "\\sqrt[3]{x^2 + y^2}",
+            "\\{ x \\in \\mathbb{R} \\mid x > 0 \\}",
+        ] {
+            assert!(to_mathml(latex, true).is_some(), "should parse: {latex}");
+            assert!(to_mathml(latex, false).is_some(), "should parse inline: {latex}");
+        }
+    }
+
+    #[test]
+    fn unsupported_constructs_fall_back_to_source() {
+        // The renderer covers a subset; anything else must leave comrak's
+        // escaped source in place rather than emit something wrong.
+        for latex in [
+            "\\vec{v}",
+            "\\overline{x}",
+            "\\begin{matrix} a & b \\end{matrix}",
+            "\\color{red}{x}",
+            "\\substack{a \\\\ b}",
+            "\\href{https://x}{y}",
+        ] {
+            assert!(to_mathml(latex, false).is_none(), "should not parse: {latex}");
+        }
+        let out = render("$$\\begin{matrix} a & b \\end{matrix}$$\n");
+        assert!(out.contains("data-math-style"), "{out}");
+        assert!(!out.contains("<math"), "{out}");
+    }
+
+    #[test]
+    fn scripts_attach_in_either_order() {
+        assert!(ml("x_i^2").contains("<msubsup>"));
+        assert!(ml("x^2_i").contains("<msubsup>"));
+        // Nested scripts stay nested.
+        assert!(ml("e^{x^{2}}").matches("<msup>").count() >= 2);
+    }
+
+    #[test]
+    fn a_formula_at_the_length_limit_still_parses() {
+        assert!(to_mathml(&"x".repeat(super::MAX_LEN), false).is_some());
+    }
+
+    #[test]
+    fn inline_code_math_is_not_display_math() {
+        assert!(render("$`a + b`$\n").contains("display=\"inline\""));
+        assert!(render("$$a + b$$\n").contains("display=\"block\""));
+    }
+
+    #[test]
+    fn plugin_metadata_is_stable() {
+        use super::super::Plugin;
+        assert_eq!(super::Math.name(), "math");
+        assert!(!super::Math.describe().is_empty());
+    }
 }
