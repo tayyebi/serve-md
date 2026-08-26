@@ -18,6 +18,12 @@ percent-encoding are all hand-rolled.
 - **Index resolution**: `GET /` (or any directory path, e.g. `GET /docs`)
   tries `index.html`, then `index.md`, in that directory; if neither exists,
   it falls back to a recursive listing of every file in the served tree.
+- **Canonical URLs**: every page has exactly one address, and the other
+  spellings `301` to it — `/docs/index.md` and `/docs/index.html` redirect to
+  `/docs`, a trailing slash is dropped (`/docs/` -> `/docs`, the root stays
+  `/`), and repeated slashes collapse (`//docs///b.md` -> `/docs/b.md`). Query
+  strings are carried across. An `index.md` shadowed by an `index.html` next
+  to it stays reachable at its own explicit URL.
 - **Markdown & HTML rendering**: requesting `.md`/`.markdown` or
   `.html`/`.htm` files directly negotiates format —
   - Browser: Markdown renders to HTML (GFM tables, strikethrough, autolinks,

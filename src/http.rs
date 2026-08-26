@@ -1,6 +1,6 @@
 use crate::auth::Auth;
 use crate::cli::Config;
-use crate::encoding::percent_decode;
+use crate::encoding::{percent_decode, percent_encode_path};
 use crate::mime;
 use crate::page;
 use crate::plugin;
@@ -154,7 +154,10 @@ fn route(
     terminal: bool,
     is_head: bool,
 ) -> io::Result<()> {
-    let target_path = req.target.split('?').next().unwrap_or("/");
+    let (target_path, query) = match req.target.split_once('?') {
+        Some((path, q)) => (path, Some(q)),
+        None => (req.target.as_str(), None),
+    };
     let decoded = match percent_decode(target_path) {
         Ok(d) => d,
         Err(_) => {
@@ -169,6 +172,12 @@ fn route(
             );
         }
     };
+    if decoded.starts_with('/') {
+        let canonical = canonical_path(&ctx.dir, &decoded);
+        if canonical != decoded {
+            return redirect(stream, &canonical, query, is_head);
+        }
+    }
     let rel = decoded.strip_prefix('/').unwrap_or(&decoded);
 
     match resolve(&ctx.dir, rel) {
@@ -317,6 +326,81 @@ fn not_found(stream: &mut TcpStream, terminal: bool, is_head: bool) -> io::Resul
 }
 
 const INDEX_CANDIDATES: &[&str] = &["index.html", "index.md"];
+
+/// The canonical spelling of a request path: runs of slashes collapsed to
+/// one, the trailing slash dropped (the root itself stays `/`), and a
+/// trailing `index.html`/`index.md` segment suppressed when the shorter path
+/// serves the very same file. Anything spelled differently is redirected
+/// here, so a document has exactly one URL.
+fn canonical_path(root: &Path, path: &str) -> String {
+    let collapsed = collapse_slashes(path);
+    match parent_of_index(&collapsed) {
+        Some(parent) if same_file(root, &collapsed, &parent) => parent,
+        _ => collapsed,
+    }
+}
+
+/// `/a//b/` -> `/a/b`; `/`, `//` and `///` all -> `/`.
+fn collapse_slashes(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() + 1);
+    out.push('/');
+    for seg in path.split('/').filter(|s| !s.is_empty()) {
+        if out.len() > 1 {
+            out.push('/');
+        }
+        out.push_str(seg);
+    }
+    out
+}
+
+/// The directory a slash-collapsed path names, when its last segment is an
+/// index file: `/docs/index.md` -> `/docs`, `/index.html` -> `/`.
+fn parent_of_index(path: &str) -> Option<String> {
+    let cut = path.rfind('/')?;
+    let name = &path[cut + 1..];
+    if !INDEX_CANDIDATES.iter().any(|c| name.eq_ignore_ascii_case(c)) {
+        return None;
+    }
+    Some(path[..cut.max(1)].to_string())
+}
+
+/// Whether two paths resolve to the same file on disk — the test for an
+/// `index.*` segment being redundant. An `index.md` shadowed by an
+/// `index.html` beside it is not redundant, and keeps its explicit URL.
+fn same_file(root: &Path, a: &str, b: &str) -> bool {
+    let a_rel = a.strip_prefix('/').unwrap_or(a);
+    let b_rel = b.strip_prefix('/').unwrap_or(b);
+    match (resolve(root, a_rel), resolve(root, b_rel)) {
+        (Resolved::File(x, _), Resolved::File(y, _)) => x == y,
+        _ => false,
+    }
+}
+
+/// Points a client at the canonical spelling of what it asked for, keeping
+/// the query string. `path` is decoded, so it is re-encoded for the header;
+/// it always starts with a single slash, which keeps the target same-origin.
+fn redirect(
+    stream: &mut TcpStream,
+    path: &str,
+    query: Option<&str>,
+    is_head: bool,
+) -> io::Result<()> {
+    let mut location = percent_encode_path(path);
+    if let Some(q) = query {
+        location.push('?');
+        location.push_str(q);
+    }
+    let body = format!("301 Moved Permanently\n{location}\n");
+    respond(
+        stream,
+        301,
+        "Moved Permanently",
+        "text/plain; charset=utf-8",
+        body.as_bytes(),
+        &[("Location", location.as_str())],
+        is_head,
+    )
+}
 
 enum Resolved {
     File(PathBuf, FileKind),
@@ -592,6 +676,15 @@ mod tests {
         http_get_accept(addr, path, ua, auth, None)
     }
 
+    /// The `Location:` value of a raw response, lowercased header name aside.
+    fn location(resp: &str) -> String {
+        resp.lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("location:"))
+            .and_then(|l| l.split_once(':'))
+            .map(|(_, v)| v.trim().to_string())
+            .unwrap_or_default()
+    }
+
     fn http_get_accept(
         addr: SocketAddr,
         path: &str,
@@ -737,9 +830,108 @@ mod tests {
         assert_eq!(status, 200);
         assert!(body.contains("Docs Index"));
 
-        let (status, body, _) = http_get(addr, "/docs/", "test-agent", None);
+        // The spellings that name the same page all point back at /docs.
+        for path in ["/docs/", "/docs/index.md", "//docs", "/docs/index.md/"] {
+            let (status, resp, _) = http_get(addr, path, "test-agent", None);
+            assert_eq!(status, 301, "path: {path}");
+            assert_eq!(location(&resp), "/docs", "path: {path}");
+        }
+    }
+
+    #[test]
+    fn repeated_slashes_collapse() {
+        let addr = start_server(setup(), None, None);
+        for path in ["//a.md", "///a.md", "/////a.md"] {
+            let (status, resp, _) = http_get(addr, path, "test-agent", None);
+            assert_eq!(status, 301, "path: {path}");
+            assert_eq!(location(&resp), "/a.md", "path: {path}");
+        }
+        let (status, resp, _) = http_get(addr, "////docs///b.md//", "test-agent", None);
+        assert_eq!(status, 301);
+        assert_eq!(location(&resp), "/docs/b.md");
+    }
+
+    #[test]
+    fn root_is_left_alone() {
+        let addr = start_server(setup(), None, None);
+        for path in ["/", "//", "////"] {
+            let (status, resp, _) = http_get(addr, path, "test-agent", None);
+            if path == "/" {
+                assert_eq!(status, 200, "path: {path}");
+            } else {
+                assert_eq!(status, 301, "path: {path}");
+                assert_eq!(location(&resp), "/", "path: {path}");
+            }
+        }
+    }
+
+    #[test]
+    fn root_index_is_suppressed() {
+        let dir = setup();
+        fs::write(dir.join("index.md"), "# Home\n").unwrap();
+        let addr = start_server(dir, None, None);
+
+        let (status, resp, _) = http_get(addr, "/index.md", "test-agent", None);
+        assert_eq!(status, 301);
+        assert_eq!(location(&resp), "/");
+
+        let (status, body, _) = http_get(addr, "/", "test-agent", None);
         assert_eq!(status, 200);
-        assert!(body.contains("Docs Index"));
+        assert!(body.contains("Home"));
+    }
+
+    #[test]
+    fn redirects_keep_the_query_string() {
+        let dir = setup();
+        fs::write(dir.join("docs").join("index.md"), "# Docs Index\n").unwrap();
+        let addr = start_server(dir, None, None);
+
+        let (status, resp, _) = http_get(addr, "/docs/index.md?q=1&x=2", "test-agent", None);
+        assert_eq!(status, 301);
+        assert_eq!(location(&resp), "/docs?q=1&x=2");
+    }
+
+    #[test]
+    fn redirect_target_is_re_encoded() {
+        let dir = tmp_dir("spaces");
+        fs::create_dir_all(dir.join("my docs")).unwrap();
+        fs::write(dir.join("my docs").join("index.md"), "# Spaced\n").unwrap();
+        let addr = start_server(dir, None, None);
+
+        let (status, resp, _) = http_get(addr, "/my%20docs/index.md", "test-agent", None);
+        assert_eq!(status, 301);
+        assert_eq!(location(&resp), "/my%20docs");
+    }
+
+    #[test]
+    fn a_shadowed_index_keeps_its_explicit_url() {
+        let dir = tmp_dir("shadowed");
+        fs::write(dir.join("index.html"), "<h1>Home</h1>").unwrap();
+        fs::write(dir.join("index.md"), "# Sidelined\n").unwrap();
+        let addr = start_server(dir, None, None);
+
+        // / serves index.html, so /index.md is not a redundant spelling of it.
+        let (status, body, _) = http_get(addr, "/index.md", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(body.contains("Sidelined"), "{body}");
+
+        let (status, resp, _) = http_get(addr, "/index.html", "test-agent", None);
+        assert_eq!(status, 301);
+        assert_eq!(location(&resp), "/");
+    }
+
+    #[test]
+    fn head_redirects_carry_no_body() {
+        let addr = start_server(setup(), None, None);
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(b"HEAD //a.md HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut resp = String::new();
+        let _ = s.read_to_string(&mut resp);
+        assert!(resp.starts_with("HTTP/1.1 301"), "{resp}");
+        assert_eq!(location(&resp), "/a.md");
+        assert!(resp.ends_with("\r\n\r\n"), "{resp}");
     }
 
     #[test]
