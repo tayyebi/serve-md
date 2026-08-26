@@ -35,12 +35,10 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Rust ships its own musl libc, but the target still wants a musl-aware
-      # linker driver.
-      - name: Install musl toolchain
-        if: endsWith(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
-
+      # No musl toolchain to install: the musl targets link self-contained,
+      # using the libc.a and crt objects rustup ships with them. That holds
+      # only while the tree stays pure Rust — a dependency that compiles C
+      # would need musl-gcc (`musl-tools`) here.
       - run: cargo build --release --target ${{ matrix.target }}
 
       # The whole point of the musl targets: assert it, do not assume it.

@@ -6,9 +6,9 @@ real path — `index.html`, `style.css`, `favicon.ico`, images, video, `.md`
 docs, all of it. `.md` and `.html` files additionally render as a clean,
 reader-friendly page for browsers and plain text for `curl`/`wget`, with
 optional HTTP Basic auth. Ships as a single **statically linked** binary with
-no runtime dependencies — not even libc — and builds from just one crate
-(`comrak`); the plugins, template engine, HTML tokenizer, base64 and
-percent-encoding are all hand-rolled.
+no runtime dependencies, and builds from just one crate (`comrak`); the
+plugins, template engine, HTML tokenizer, base64 and percent-encoding are all
+hand-rolled.
 
 ## Features
 
@@ -224,16 +224,15 @@ $ curl http://127.0.0.1:8080/favicon.ico -o favicon.ico
 Download a binary from [releases][releases] and run it — there is nothing to
 install alongside it.
 
-| Binary | Target | Requires |
-| ------ | ------ | -------- |
-| `serve-md-linux-x86_64` | `x86_64-unknown-linux-musl` | any Linux kernel; **no glibc, no shared libraries** |
-| `serve-md-linux-aarch64` | `aarch64-unknown-linux-musl` | any ARM64 Linux kernel; same |
-| `serve-md-windows-x86_64.exe` | `x86_64-pc-windows-msvc` | no Visual C++ redistributable (the CRT is linked in) |
+| Binary | Target |
+| ------ | ------ |
+| `serve-md-linux-x86_64` | `x86_64-unknown-linux-musl` |
+| `serve-md-linux-aarch64` | `aarch64-unknown-linux-musl` |
+| `serve-md-windows-x86_64.exe` | `x86_64-pc-windows-msvc` |
 
-The Linux builds target musl and are fully static, so they run on old
-distributions regardless of the glibc version installed — a dynamically linked
-build made on a current runner would refuse to start on anything older than the
-machine that produced it. CI asserts this on every release: a binary carrying a
+Every binary is linked statically — no shared libraries, no dynamic loader, no
+runtime to install — so it runs on any kernel of its architecture, however old
+the distribution. CI asserts this on every release: a Linux binary carrying a
 `NEEDED` entry or a program interpreter fails the build.
 
 [releases]: https://github.com/tayyebi/serve-md/releases
