@@ -12,6 +12,7 @@ use comrak::{parse_document, Arena, Options};
 
 mod math;
 mod mermaid;
+mod webmcp;
 
 /// A render extension. Hooks the pipeline at three points: parser setup, an AST
 /// pass, and `<head>` markup.
@@ -48,9 +49,10 @@ pub trait Plugin: Sync {
 
 static MATH: math::Math = math::Math;
 static MERMAID: mermaid::Mermaid = mermaid::Mermaid;
+static WEBMCP: webmcp::WebMcp = webmcp::WebMcp;
 
 /// Every plugin compiled into this binary.
-pub static REGISTRY: &[&dyn Plugin] = &[&MATH, &MERMAID];
+pub static REGISTRY: &[&dyn Plugin] = &[&MATH, &MERMAID, &WEBMCP];
 
 /// `name — description` for each registered plugin, for `--help`.
 pub fn catalog() -> Vec<String> {
@@ -111,6 +113,15 @@ impl Set {
         self.0.is_empty()
     }
 
+    /// Whether a named plugin is active.
+    ///
+    /// Plugins have so far only affected rendering, which `Set` applies on the
+    /// caller's behalf. `webmcp` also gates whole routes — `/mcp`, `/llms.txt`
+    /// — so the router has to be able to ask.
+    pub fn has(&self, name: &str) -> bool {
+        self.0.iter().any(|p| p.name() == name)
+    }
+
     /// The names of the active plugins, in the order they were requested.
     pub fn names(&self) -> Vec<&'static str> {
         self.0.iter().map(|p| p.name()).collect()
@@ -128,6 +139,15 @@ impl Set {
         options.extension.table = true;
         options.extension.autolink = true;
         options.extension.tasklist = true;
+        // Front matter is metadata for the generator, not prose for the
+        // reader. Without this comrak parses a leading `---` block as a
+        // thematic break followed by a setext heading, so every document
+        // written by a static-site generator opens with its own YAML rendered
+        // as a title. Set here rather than per-format so the browser, the
+        // terminal renderer and `docmeta`'s title extraction agree — a title
+        // read from the frontmatter block instead of the real `# heading`
+        // would otherwise leak into `llms.txt` and the MCP tool output.
+        options.extension.front_matter_delimiter = Some("---".to_string());
         for plugin in &self.0 {
             plugin.configure(&mut options);
         }
@@ -214,9 +234,35 @@ mod tests {
     }
 
     #[test]
+    fn front_matter_is_stripped_from_every_format() {
+        let s = Set::default();
+        let src = "---\ntitle: \"Real Title\"\ndate: 2025-06-30\n---\n# Real Title\n\nBody.\n";
+        let html = s.render_html(src).html;
+        assert!(html.contains("<h1>Real Title</h1>"));
+        // The give-away of an unparsed block: comrak reads the closing `---`
+        // as underlining the `date:` line into a setext heading.
+        assert!(!html.contains("date:"));
+        assert!(!html.contains("<hr"));
+        assert!(!crate::ascii::markdown_to_ascii(src, &s.options()).contains("title:"));
+        assert_eq!(
+            crate::docmeta::title(src, &s.options()).as_deref(),
+            Some("Real Title")
+        );
+    }
+
+    #[test]
     fn catalog_describes_every_plugin() {
         assert_eq!(catalog().len(), REGISTRY.len());
         assert!(catalog().iter().any(|line| line.starts_with("math — ")));
         assert!(catalog().iter().any(|line| line.starts_with("mermaid — ")));
+        assert!(catalog().iter().any(|line| line.starts_with("webmcp — ")));
+    }
+
+    #[test]
+    fn has_reports_only_active_plugins() {
+        let s = set(&["webmcp"]);
+        assert!(s.has("webmcp"));
+        assert!(!s.has("math"));
+        assert!(!Set::default().has("webmcp"));
     }
 }

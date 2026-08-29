@@ -1,11 +1,16 @@
 use crate::auth::Auth;
+use crate::catalog::Catalog;
 use crate::cli::Config;
 use crate::encoding::{percent_decode, percent_encode_path};
+use crate::json::Value;
+use crate::llms;
+use crate::mcp;
 use crate::mime;
 use crate::page;
 use crate::plugin;
 use crate::render;
-use crate::scanner::{is_forbidden_segment, scan, FileEntry, FileKind};
+use crate::scanner::{is_forbidden_segment, FileEntry, FileKind};
+use crate::search;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -27,6 +32,41 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How much of one attacker-supplied field reaches a `--verbose` log line.
 const MAX_LOG_FIELD: usize = 512;
+/// The largest request body accepted. Only the MCP endpoint reads one, and a
+/// JSON-RPC call naming a document and a query has no business approaching
+/// this.
+const MAX_BODY: usize = 1024 * 1024;
+
+/// The path the MCP endpoint answers on.
+///
+/// A single path serving POST, which is all revision 2026-07-28 requires: the
+/// GET stream endpoint and the DELETE session teardown were both removed.
+const MCP_PATH: &str = "/mcp";
+/// Generated when the served tree does not contain a file of the same name.
+const LLMS_PATH: &str = "/llms.txt";
+const LLMS_FULL_PATH: &str = "/llms-full.txt";
+/// The server card, so a client can discover the endpoint without guessing.
+/// `.well-known` is already the one hidden directory the router will serve.
+const MCP_CARD_PATH: &str = "/.well-known/mcp.json";
+
+/// Cross-origin headers for the MCP endpoint.
+///
+/// serve-md is meant to be deployed publicly, where the callers are hosted
+/// agents. Those reach the endpoint server-to-server and send no `Origin` at
+/// all, so there is no origin to check; browser-resident agents do send one,
+/// and need these headers to be allowed to read the reply. The endpoint
+/// exposes exactly the documents the website already serves — and sits behind
+/// the same `--user`/`--pass` when set — so opening it adds no reach that a
+/// plain GET did not already have.
+const CORS: &[(&str, &str)] = &[
+    ("Access-Control-Allow-Origin", "*"),
+    ("Access-Control-Allow-Methods", "POST, OPTIONS"),
+    (
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization, MCP-Protocol-Version, Mcp-Method, Mcp-Name",
+    ),
+    ("Access-Control-Max-Age", "86400"),
+];
 
 struct Request {
     method: String,
@@ -34,16 +74,36 @@ struct Request {
     headers: Vec<(String, String)>,
     ua: String,
     accept: String,
+    /// Empty for every method but POST. Read only up to [`MAX_BODY`].
+    body: String,
 }
 
 struct Ctx {
     dir: PathBuf,
-    files: Vec<FileEntry>,
+    /// The served file list. Shared with the MCP tools and `llms.txt`, and
+    /// refreshed by a watcher under `--fresh`.
+    catalog: Arc<Catalog>,
     auth: Option<Auth>,
     verbose: bool,
     plugins: plugin::Set,
+    /// Whether `--plugin webmcp` was given, which gates `/mcp`, `/llms.txt`
+    /// and the server card.
+    mcp: bool,
+    /// The search tool found at startup, if any.
+    engine: Option<search::Engine>,
     /// Connections currently being served, against `MAX_LIVE_CONNECTIONS`.
     live: AtomicUsize,
+}
+
+impl Ctx {
+    /// The `<head>` markup the active plugins contribute to every page.
+    ///
+    /// `math` and `mermaid` add markup only to documents they changed, so they
+    /// contribute nothing here; `webmcp` registers its tools on every page,
+    /// including the listing, which has no Markdown to transform at all.
+    fn page_head(&self) -> String {
+        self.plugins.render_html("").head
+    }
 }
 
 pub fn serve(cfg: Config) -> io::Result<()> {
@@ -52,17 +112,26 @@ pub fn serve(cfg: Config) -> io::Result<()> {
 }
 
 fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
-    let files = scan(&cfg.dir)?;
+    let catalog = Arc::new(Catalog::scan(&cfg.dir)?);
+    if cfg.fresh {
+        catalog.spawn_watcher(cfg.fresh_interval, cfg.verbose);
+    }
     let auth = match (cfg.user.as_ref(), cfg.pass.as_ref()) {
         (Some(u), Some(p)) => Some(Auth::new(u.clone(), p.clone())),
         _ => None,
     };
+    let mcp = cfg.plugins.has("webmcp");
+    // Probed once here rather than per query, so a missing search tool is
+    // reported in the banner instead of at the first `search_docs` call.
+    let engine = if mcp { search::detect() } else { None };
     let ctx = Arc::new(Ctx {
         dir: cfg.dir.clone(),
-        files,
+        catalog,
         auth,
         verbose: cfg.verbose,
         plugins: cfg.plugins,
+        mcp,
+        engine,
         live: AtomicUsize::new(0),
     });
 
@@ -82,7 +151,20 @@ fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
     if !ctx.plugins.is_empty() {
         println!("plugins: {}", ctx.plugins.names().join(", "));
     }
+    if cfg.fresh {
+        println!("watching: every {}ms", cfg.fresh_interval.as_millis());
+    }
     println!("  {url}");
+    if ctx.mcp {
+        println!("  {url}mcp          Model Context Protocol");
+        println!("  {url}llms.txt     index for language models");
+        match ctx.engine {
+            Some(e) => println!("search: {}", e.binary()),
+            // Worth a line of its own: everything else works, and the failure
+            // would otherwise only surface inside a tool call an agent made.
+            None => println!("search: DISABLED — no rg, ag or grep on PATH"),
+        }
+    }
     if !cfg.no_open {
         open_browser(&url);
     }
@@ -123,20 +205,29 @@ fn handle_connection(stream: &mut TcpStream, ctx: &Ctx) -> io::Result<()> {
         return Ok(());
     };
     let is_head = req.method == "HEAD";
-    if req.method != "GET" && req.method != "HEAD" {
-        return respond(
-            stream,
-            405,
-            "Method Not Allowed",
-            "text/plain; charset=utf-8",
-            b"405 Method Not Allowed\n",
-            &[("Allow", "GET, HEAD")],
-            is_head,
-        );
-    }
-
     let terminal = ua_is_terminal(&req.ua);
     verbose_log(&req, terminal, ctx);
+
+    let on_mcp = ctx.mcp && path_of(&req.target) == MCP_PATH;
+
+    // Answered before the auth check on purpose. A CORS preflight carries no
+    // credentials — browsers do not send them — so requiring auth here would
+    // block every cross-origin agent before it ever got the chance to
+    // authenticate on the real request.
+    if req.method == "OPTIONS" {
+        if on_mcp {
+            return respond(stream, 204, "No Content", "text/plain", b"", CORS, false);
+        }
+        return method_not_allowed(stream, "GET, HEAD", is_head);
+    }
+
+    if req.method == "POST" {
+        if !on_mcp {
+            return method_not_allowed(stream, "GET, HEAD", is_head);
+        }
+    } else if req.method != "GET" && req.method != "HEAD" {
+        return method_not_allowed(stream, "GET, HEAD", is_head);
+    }
     let auth_ok = match &ctx.auth {
         Some(a) => a.check(&req.headers),
         None => true,
@@ -166,7 +257,52 @@ fn handle_connection(stream: &mut TcpStream, ctx: &Ctx) -> io::Result<()> {
         );
     }
 
+    if req.method == "POST" {
+        return serve_mcp(ctx, stream, &req);
+    }
     route(ctx, stream, &req, terminal, is_head)
+}
+
+fn method_not_allowed(stream: &mut TcpStream, allow: &str, is_head: bool) -> io::Result<()> {
+    respond(
+        stream,
+        405,
+        "Method Not Allowed",
+        "text/plain; charset=utf-8",
+        b"405 Method Not Allowed\n",
+        &[("Allow", allow)],
+        is_head,
+    )
+}
+
+/// The path part of a request target, without the query.
+fn path_of(target: &str) -> &str {
+    target.split('?').next().unwrap_or(target)
+}
+
+/// Answers one MCP request.
+///
+/// The body has already been read and bounded by `read_request`; everything
+/// protocol-shaped happens in [`mcp::handle`], which is transport-agnostic and
+/// tested on its own.
+fn serve_mcp(ctx: &Ctx, stream: &mut TcpStream, req: &Request) -> io::Result<()> {
+    let snap = ctx.catalog.current();
+    let mcp_ctx = mcp::Ctx {
+        root: &ctx.dir,
+        snap: &snap,
+        plugins: &ctx.plugins,
+        engine: ctx.engine,
+    };
+    let reply = mcp::handle(&req.body, &req.headers, &mcp_ctx);
+    respond(
+        stream,
+        reply.status,
+        reply.reason,
+        "application/json",
+        reply.body.as_bytes(),
+        CORS,
+        false,
+    )
 }
 
 fn route(
@@ -209,6 +345,16 @@ fn route(
             is_head,
         );
     }
+    // Resolved before canonicalisation, because the path-to-file mapping below
+    // is total: it has no seam for a path that names no file on disk. Every
+    // one of these yields to a real file of the same name, so an author who
+    // writes their own `llms.txt` is served theirs.
+    if ctx.mcp {
+        if let Some(result) = synthetic(ctx, stream, &decoded, is_head) {
+            return result;
+        }
+    }
+
     let canonical = canonical_path(&ctx.dir, &decoded);
     if canonical != decoded {
         return redirect(stream, &canonical, query, is_head);
@@ -217,14 +363,34 @@ fn route(
 
     match resolve(&ctx.dir, rel) {
         Resolved::File(full, kind) => serve_file(ctx, stream, &full, kind, terminal, &req.accept, is_head),
-        Resolved::Listing => listing(ctx, stream, terminal, is_head),
+        Resolved::Listing(under) => listing(ctx, stream, &under, terminal, is_head),
         Resolved::NotFound => not_found(stream, terminal, is_head),
     }
 }
 
-fn listing(ctx: &Ctx, stream: &mut TcpStream, terminal: bool, is_head: bool) -> io::Result<()> {
+/// The file listing for one directory. `under` is its root-relative path, or
+/// empty for the served root.
+///
+/// The catalog is a flat snapshot of the whole tree, so the directory a
+/// request actually named is applied here as a filter. Serving the entire
+/// tree for `/a/b` would answer a question nobody asked and, in a deep tree,
+/// bury the handful of files that directory holds.
+fn listing(
+    ctx: &Ctx,
+    stream: &mut TcpStream,
+    under: &str,
+    terminal: bool,
+    is_head: bool,
+) -> io::Result<()> {
+    let snap = ctx.catalog.current();
+    let files = files_under(&snap.files, under);
+    let dir = if under.is_empty() {
+        ctx.dir.clone()
+    } else {
+        ctx.dir.join(under)
+    };
     if terminal {
-        let body = page::listing_plain(&ctx.files, &ctx.dir);
+        let body = page::listing_plain(&files, &dir, ctx.mcp);
         respond(
             stream,
             200,
@@ -235,7 +401,10 @@ fn listing(ctx: &Ctx, stream: &mut TcpStream, terminal: bool, is_head: bool) -> 
             is_head,
         )
     } else {
-        let body = page::listing_html(&ctx.files, &ctx.dir);
+        // The listing has no Markdown to transform, so without passing the
+        // head markup explicitly the `webmcp` script would reach every
+        // document page and not the page most visitors land on first.
+        let body = page::listing_html(&files, &dir, &ctx.page_head());
         respond(
             stream,
             200,
@@ -246,6 +415,32 @@ fn listing(ctx: &Ctx, stream: &mut TcpStream, terminal: bool, is_head: bool) -> 
             is_head,
         )
     }
+}
+
+/// The catalog entries a listing for `under` should show.
+///
+/// The root listing stays the whole tree: it is the site's index, the target
+/// of every "All files" breadcrumb, and what `curl <base>/` is documented to
+/// return. A subdirectory listing is scoped to that directory and one level
+/// deep, so it shows what a file manager would — its own files, with nested
+/// directories left to their own listings.
+///
+/// Entries are cloned because the snapshot is shared behind an `Arc` and the
+/// page renderers take a slice; a subdirectory's worth is a small copy.
+fn files_under(files: &[FileEntry], under: &str) -> Vec<FileEntry> {
+    if under.is_empty() {
+        return files.to_vec();
+    }
+    files
+        .iter()
+        .filter(|f| {
+            f.rel
+                .strip_prefix(under)
+                .and_then(|tail| tail.strip_prefix('/'))
+                .is_some_and(|tail| !tail.contains('/'))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Serves an already-resolved file, negotiating format for `Markdown`/`Html`
@@ -306,7 +501,7 @@ fn serve_file(
             &rendered.html,
             &rendered.head,
             &ctx.dir,
-            ctx.files.len(),
+            ctx.catalog.current().len(),
         ),
         _ => rendered.html,
     };
@@ -469,10 +664,122 @@ fn redirect(
     )
 }
 
+/// Serves the paths that are generated rather than read from disk, or `None`
+/// if this request is not one of them and should fall through to the ordinary
+/// file mapping.
+fn synthetic(
+    ctx: &Ctx,
+    stream: &mut TcpStream,
+    path: &str,
+    is_head: bool,
+) -> Option<io::Result<()>> {
+    let snap = ctx.catalog.current();
+    // A file the author wrote always wins over a file this server would
+    // invent. Checked first, and for every path, so the rule needs no
+    // per-route repetition.
+    if snap.contains(path.trim_start_matches('/')) {
+        return None;
+    }
+
+    // The body is built first and written once at the end, rather than through
+    // a closure per arm: a closure capturing `stream` would hold a mutable
+    // borrow across the whole match, which the `MCP_PATH` arm also needs.
+    let (body, ctype) = match path {
+        // 2026-07-28 §"Backward Compatibility": a server implementing only
+        // this revision answers GET or DELETE on the MCP endpoint with 405,
+        // since the GET stream and the DELETE session teardown are gone.
+        MCP_PATH => return Some(method_not_allowed(stream, "POST, OPTIONS", is_head)),
+        LLMS_PATH => (
+            llms::llms_txt(&ctx.dir, &snap, &ctx.plugins.options(), ctx.mcp),
+            "text/plain; charset=utf-8",
+        ),
+        LLMS_FULL_PATH => (
+            llms::llms_full_txt(&ctx.dir, &snap, &ctx.plugins.options()),
+            "text/plain; charset=utf-8",
+        ),
+        MCP_CARD_PATH => (server_card(), "application/json"),
+        _ => return None,
+    };
+    Some(respond(stream, 200, "OK", ctype, body.as_bytes(), &[], is_head))
+}
+
+/// The MCP server card: what this endpoint is, before a client connects to it.
+///
+/// Follows the shape proposed in SEP-1649, "MCP Server Cards — HTTP Server
+/// Discovery via .well-known" — an `mcp` object holding `spec_version`, a
+/// `servers` array and a `tools` array.
+/// <https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1649>
+///
+/// That SEP is a proposal, not a ratified part of the specification, so this
+/// file is a convenience for clients that look for it and is ignored by
+/// everything else. The endpoint works without it.
+///
+/// The URL is relative on purpose: the server does not reliably know the host
+/// and scheme it is reached through, and inventing one from the `Host` header
+/// would be a guess a proxy could make wrong.
+fn server_card() -> String {
+    let tools: Vec<Value> = mcp::tools::definitions()
+        .iter()
+        .map(|t| {
+            Value::obj([
+                ("name", t.get("name").cloned().unwrap_or(Value::Null)),
+                (
+                    "description",
+                    t.get("description").cloned().unwrap_or(Value::Null),
+                ),
+            ])
+        })
+        .collect();
+
+    let card = Value::obj([(
+        "mcp",
+        Value::obj([
+            ("spec_version", Value::str("2025-11-25")),
+            (
+                "servers",
+                Value::Arr(vec![Value::obj([
+                    ("name", Value::str("serve-md")),
+                    ("version", Value::str(env!("CARGO_PKG_VERSION"))),
+                    (
+                        "description",
+                        Value::str("Markdown and HTML documents served from a directory."),
+                    ),
+                    ("url", Value::str(MCP_PATH)),
+                    ("transport", Value::str("streamable-http")),
+                    (
+                        "protocol_versions",
+                        Value::Arr(mcp::SUPPORTED.iter().map(|v| Value::str(*v)).collect()),
+                    ),
+                ])]),
+            ),
+            ("tools", Value::Arr(tools)),
+        ]),
+    )]);
+    crate::json::write(&card)
+}
+
 enum Resolved {
     File(PathBuf, FileKind),
-    Listing,
+    /// A directory with no index file, named by its root-relative path —
+    /// empty for the served root itself. The path is what scopes the listing
+    /// to that directory instead of showing the whole tree.
+    Listing(String),
     NotFound,
+}
+
+/// Resolves a served document for a caller outside this module.
+///
+/// The MCP tools need to turn an agent-supplied path into a file, and must do
+/// it through exactly the checks the website uses — `safe_join`'s filter on the
+/// request string, then the canonicalise-and-contain test, then the
+/// forbidden-segment test on where it actually landed. Exposing this is what
+/// keeps there from being a second, subtly different implementation of the
+/// server's path security.
+pub(crate) fn resolve_document(root: &Path, rel: &str) -> Option<(PathBuf, FileKind)> {
+    match resolve(root, rel) {
+        Resolved::File(full, kind) => Some((full, kind)),
+        Resolved::Listing(_) | Resolved::NotFound => None,
+    }
 }
 
 /// Hard caps on the shape of a request path, so a pathological URL cannot
@@ -577,7 +884,7 @@ fn resolve(root: &Path, rel: &str) -> Resolved {
                 return Resolved::File(idx_c, kind);
             }
         }
-        return Resolved::Listing;
+        return Resolved::Listing(rel.trim_matches('/').to_string());
     }
     Resolved::NotFound
 }
@@ -623,32 +930,53 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
             break;
         }
     }
-    let head_end = buf
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .or_else(|| buf.windows(2).position(|w| w == b"\n\n"))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "malformed request"))?;
-    let head = String::from_utf8_lossy(&buf[..head_end]);
-    let mut lines = head.lines();
-    let request_line = lines.next().unwrap_or_default();
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or_default().to_string();
-    let target = parts.next().unwrap_or_default().to_string();
-    let mut headers: Vec<(String, String)> = Vec::new();
-    for line in lines {
-        if let Some(ci) = line.find(':') {
+    // The separator's own length is needed to find where the body starts, so
+    // the two forms are matched separately rather than folded together.
+    let (head_end, sep_len) = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(i) => (i, 4),
+        None => match buf.windows(2).position(|w| w == b"\n\n") {
+            Some(i) => (i, 2),
+            None => {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "malformed request"))
+            }
+        },
+    };
+    // Scoped so the borrow of `buf` ends before the body is split off it.
+    let (method, target, headers) = {
+        let head = String::from_utf8_lossy(&buf[..head_end]);
+        let mut lines = head.lines();
+        let request_line = lines.next().unwrap_or_default();
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or_default().to_string();
+        let target = parts.next().unwrap_or_default().to_string();
+        let mut headers: Vec<(String, String)> = Vec::new();
+        for line in lines {
             // Dropping the excess instead would fail open in the wrong
             // direction — a request could bury its Authorization header past
             // the cap — so an over-long header list ends the connection.
-            if headers.len() >= MAX_HEADERS {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "too many request headers",
-                ));
+            if let Some(ci) = line.find(':') {
+                if headers.len() >= MAX_HEADERS {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "too many request headers",
+                    ));
+                }
+                headers.push((line[..ci].trim().to_string(), line[ci + 1..].trim().to_string()));
             }
-            headers.push((line[..ci].trim().to_string(), line[ci + 1..].trim().to_string()));
         }
-    }
+        (method, target, headers)
+    };
+
+    // Only POST carries one, and only the MCP endpoint accepts POST. Anything
+    // a GET sent as a body is left unread on the socket, which is harmless
+    // given every response closes the connection.
+    let body = if method == "POST" {
+        let leftover = buf.split_off(head_end + sep_len);
+        read_body(stream, &headers, leftover, start)?
+    } else {
+        String::new()
+    };
+
     let ua = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
@@ -665,7 +993,68 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
         headers,
         ua,
         accept,
+        body,
     }))
+}
+
+/// Reads a request body of exactly `Content-Length` bytes, under the same
+/// deadline as the head.
+///
+/// Ending the connection rather than answering 413 on an over-long body is
+/// deliberate and matches what an over-long header list already does: the
+/// request has not been understood, and reading megabytes of it only to
+/// discard them is work an attacker chose for the server.
+fn read_body(
+    stream: &mut TcpStream,
+    headers: &[(String, String)],
+    mut have: Vec<u8>,
+    start: Instant,
+) -> io::Result<String> {
+    // Refused rather than parsed. A body whose length the server must compute
+    // from the body itself is where request smuggling lives, and no MCP client
+    // needs chunked encoding to send a few hundred bytes of JSON.
+    if headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "transfer-encoding is not supported",
+        ));
+    }
+
+    let len = match headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+    {
+        Some((_, v)) => v.trim().parse::<usize>().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid content-length")
+        })?,
+        None => 0,
+    };
+    if len > MAX_BODY {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "request body too large",
+        ));
+    }
+
+    // Whatever arrived alongside the head, capped: bytes past `len` belong to
+    // a pipelined request this server does not serve.
+    have.truncate(len);
+    let mut tmp = [0u8; 4096];
+    while have.len() < len {
+        if start.elapsed() > HEAD_TIMEOUT {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "request body too slow"));
+        }
+        let n = stream.read(&mut tmp)?;
+        if n == 0 {
+            break;
+        }
+        let wanted = (len - have.len()).min(n);
+        have.extend_from_slice(&tmp[..wanted]);
+    }
+    Ok(String::from_utf8_lossy(&have).into_owned())
 }
 
 fn has_header_end(buf: &[u8]) -> bool {
@@ -789,6 +1178,7 @@ mod tests {
     use std::fs;
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::SystemTime;
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -833,6 +1223,8 @@ mod tests {
             no_open: true,
             verbose: false,
             plugins: plugin::Set::resolve(&names).unwrap(),
+            fresh: false,
+            fresh_interval: Duration::from_millis(1000),
         };
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
@@ -850,6 +1242,63 @@ mod tests {
         auth: Option<&str>,
     ) -> (u16, String, String) {
         http_get_accept(addr, path, ua, auth, None)
+    }
+
+    /// Sends a raw request and returns `(status, whole response)`.
+    fn http_send(addr: SocketAddr, req: &str) -> (u16, String) {
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(req.as_bytes()).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut resp = String::new();
+        let _ = s.read_to_string(&mut resp);
+        let status = resp
+            .lines()
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("000")
+            .parse()
+            .unwrap_or(0);
+        (status, resp)
+    }
+
+    fn http_post(
+        addr: SocketAddr,
+        path: &str,
+        headers: &[(&str, &str)],
+        auth: Option<&str>,
+        body: &str,
+    ) -> (u16, String) {
+        let mut req = format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n",
+            body.len()
+        );
+        for (k, v) in headers {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        if let Some(a) = auth {
+            req.push_str(&format!("Authorization: Basic {a}\r\n"));
+        }
+        req.push_str("\r\n");
+        req.push_str(body);
+        http_send(addr, &req)
+    }
+
+    /// The body of a raw response.
+    fn body_of(resp: &str) -> &str {
+        resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("")
+    }
+
+    /// Calls one MCP tool and returns the text content it produced.
+    fn call_tool(addr: SocketAddr, name: &str, args: &str) -> String {
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{args}}}}}"#
+        );
+        let (status, resp) = http_post(addr, "/mcp", &[], None, &body);
+        assert_eq!(status, 200, "{resp}");
+        body_of(&resp).to_string()
     }
 
     /// The `Location:` value of a raw response, lowercased header name aside.
@@ -1130,6 +1579,56 @@ mod tests {
         assert_eq!(status, 200);
         assert!(ct.contains("text/html"));
         assert!(body.contains("docs/b.md"));
+    }
+
+    #[test]
+    fn a_subdirectory_listing_shows_only_that_directory() {
+        let dir = tmp_dir("scoped");
+        fs::create_dir_all(dir.join("guides/deep")).unwrap();
+        fs::write(dir.join("top.md"), "# Top\n").unwrap();
+        fs::write(dir.join("guides/one.md"), "# One\n").unwrap();
+        fs::write(dir.join("guides/deep/two.md"), "# Two\n").unwrap();
+        let addr = start_server(dir, None, None);
+
+        let (status, body, _) = http_get(addr, "/guides", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(body.contains("guides/one.md"));
+        // A sibling outside the directory and a file nested below it are both
+        // somebody else's listing.
+        assert!(!body.contains("top.md"));
+        assert!(!body.contains("guides/deep/two.md"));
+    }
+
+    #[test]
+    fn the_root_listing_still_shows_the_whole_tree() {
+        let addr = start_server(setup(), None, None);
+        let (status, body, _) = http_get(addr, "/", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(body.contains("a.md"));
+        assert!(body.contains("docs/b.md"));
+    }
+
+    #[test]
+    fn files_under_filters_to_one_level() {
+        let entry = |rel: &str| FileEntry {
+            rel: rel.into(),
+            size: 0,
+            modified: SystemTime::UNIX_EPOCH,
+        };
+        let all = vec![
+            entry("top.md"),
+            entry("guides/one.md"),
+            entry("guides/deep/two.md"),
+            // A directory whose name merely starts with "guides" is not inside it.
+            entry("guides-extra/three.md"),
+        ];
+        let rels = |under: &str| -> Vec<String> {
+            files_under(&all, under).into_iter().map(|f| f.rel).collect()
+        };
+        assert_eq!(rels("guides"), vec!["guides/one.md".to_string()]);
+        assert_eq!(rels("guides/deep"), vec!["guides/deep/two.md".to_string()]);
+        assert_eq!(rels("").len(), all.len());
+        assert!(rels("nowhere").is_empty());
     }
 
     #[test]
@@ -1423,5 +1922,257 @@ mod tests {
         assert!(body.contains("<svg"), "{body}");
         // Each plugin contributes its own <head> block.
         assert_eq!(body.matches("<style>").count(), 2, "{body}");
+    }
+
+    // ------------------------------------------------------- the agent surface
+
+    #[test]
+    fn the_agent_routes_do_not_exist_without_the_plugin() {
+        // The default server must be exactly what it was before this feature.
+        let addr = start_server(tmp_dir("noplugin"), None, None);
+        let (status, resp) = http_post(addr, "/mcp", &[], None, r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
+        assert_eq!(status, 405, "{resp}");
+        for path in ["/llms.txt", "/llms-full.txt", "/.well-known/mcp.json"] {
+            let (status, _, _) = http_get(addr, path, "test-agent", None);
+            assert_eq!(status, 404, "{path} must not exist without --plugin webmcp");
+        }
+    }
+
+    #[test]
+    fn tools_list_is_served_over_post() {
+        let addr = start_server_with(tmp_dir("tools"), None, None, &["webmcp"]);
+        let (status, resp) = http_post(
+            addr,
+            "/mcp",
+            &[],
+            None,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+        );
+        assert_eq!(status, 200, "{resp}");
+        assert!(resp.to_ascii_lowercase().contains("content-type: application/json"));
+        let body = body_of(&resp);
+        for tool in ["search_docs", "read_doc", "list_docs", "get_outline"] {
+            assert!(body.contains(tool), "{tool} missing from {body}");
+        }
+    }
+
+    #[test]
+    fn get_and_delete_on_the_endpoint_are_refused() {
+        // 2026-07-28 removed the GET stream and the DELETE session teardown.
+        let addr = start_server_with(tmp_dir("getmcp"), None, None, &["webmcp"]);
+        let (status, resp, _) = http_get(addr, "/mcp", "test-agent", None);
+        assert_eq!(status, 405);
+        assert!(resp.contains("Allow: POST, OPTIONS"), "{resp}");
+
+        let (status, _) = http_send(
+            addr,
+            "DELETE /mcp HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert_eq!(status, 405);
+    }
+
+    #[test]
+    fn a_cors_preflight_is_answered_without_credentials() {
+        // A browser never sends Authorization on a preflight, so requiring it
+        // would lock every cross-origin agent out before it could authenticate.
+        let addr = start_server_with(tmp_dir("pre"), Some("u"), Some("p"), &["webmcp"]);
+        let (status, resp) = http_send(
+            addr,
+            "OPTIONS /mcp HTTP/1.1\r\nHost: localhost\r\nOrigin: https://agent.example\r\n\
+             Access-Control-Request-Method: POST\r\n\r\n",
+        );
+        assert_eq!(status, 204, "{resp}");
+        assert!(resp.contains("Access-Control-Allow-Origin: *"), "{resp}");
+        assert!(resp.contains("MCP-Protocol-Version"), "{resp}");
+    }
+
+    #[test]
+    fn the_endpoint_is_behind_the_same_auth_as_the_site() {
+        let addr = start_server_with(tmp_dir("mcpauth"), Some("u"), Some("p"), &["webmcp"]);
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let (status, _) = http_post(addr, "/mcp", &[], None, body);
+        assert_eq!(status, 401, "no credentials, no tools");
+        // "u:p"
+        let (status, resp) = http_post(addr, "/mcp", &[], Some("dTpw"), body);
+        assert_eq!(status, 200, "{resp}");
+    }
+
+    #[test]
+    fn a_reply_carries_cors_headers_for_browser_agents() {
+        let addr = start_server_with(tmp_dir("cors"), None, None, &["webmcp"]);
+        let (_, resp) = http_post(
+            addr,
+            "/mcp",
+            &[("Origin", "https://agent.example")],
+            None,
+            r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#,
+        );
+        assert!(resp.contains("Access-Control-Allow-Origin: *"), "{resp}");
+    }
+
+    #[test]
+    fn an_oversized_body_never_reaches_the_parser() {
+        let addr = start_server_with(tmp_dir("big"), None, None, &["webmcp"]);
+        let req = format!(
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY + 1
+        );
+        let (status, resp) = http_send(addr, &req);
+        // The connection ends rather than the server reading a megabyte it has
+        // already decided to reject.
+        assert!(status == 0 || status >= 400, "got {status}: {resp}");
+    }
+
+    #[test]
+    fn chunked_bodies_are_refused_rather_than_parsed() {
+        let addr = start_server_with(tmp_dir("chunked"), None, None, &["webmcp"]);
+        let (status, resp) = http_send(
+            addr,
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        );
+        assert!(status == 0 || status >= 400, "got {status}: {resp}");
+    }
+
+    #[test]
+    fn llms_txt_is_generated_from_the_tree() {
+        let addr = start_server_with(setup(), None, None, &["webmcp"]);
+        let (status, resp, ct) = http_get(addr, "/llms.txt", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(ct.to_ascii_lowercase().contains("text/plain"));
+        let body = body_of(&resp);
+        assert!(body.starts_with("# "), "{body}");
+        assert!(body.contains("(/a.md)"), "{body}");
+        assert!(body.contains("(/docs/b.md)"), "{body}");
+        assert!(body.contains("/mcp"), "the endpoint is announced");
+    }
+
+    #[test]
+    fn a_local_llms_txt_wins_over_the_generated_one() {
+        let dir = tmp_dir("llmslocal");
+        fs::write(dir.join("llms.txt"), "# Mine\n\n> Hand written.\n").unwrap();
+        let addr = start_server_with(dir, None, None, &["webmcp"]);
+        let (status, resp, _) = http_get(addr, "/llms.txt", "test-agent", None);
+        assert_eq!(status, 200);
+        assert_eq!(body_of(&resp), "# Mine\n\n> Hand written.\n");
+    }
+
+    #[test]
+    fn llms_full_txt_carries_the_documents_themselves() {
+        let addr = start_server_with(setup(), None, None, &["webmcp"]);
+        let (status, resp, _) = http_get(addr, "/llms-full.txt", "test-agent", None);
+        assert_eq!(status, 200);
+        let body = body_of(&resp);
+        assert!(body.contains("Hello **world**."), "{body}");
+        assert!(body.contains("Source: `/docs/b.md`"), "{body}");
+    }
+
+    #[test]
+    fn the_server_card_describes_the_endpoint() {
+        let addr = start_server_with(tmp_dir("card"), None, None, &["webmcp"]);
+        let (status, resp, ct) = http_get(addr, "/.well-known/mcp.json", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(ct.contains("application/json"), "{ct}");
+        let v = crate::json::parse(body_of(&resp)).unwrap();
+        let servers = v.get("mcp").unwrap().get("servers").unwrap().as_arr().unwrap();
+        assert_eq!(servers[0].get("url").unwrap().as_str(), Some("/mcp"));
+        assert_eq!(servers[0].get("transport").unwrap().as_str(), Some("streamable-http"));
+        assert_eq!(v.get("mcp").unwrap().get("tools").unwrap().as_arr().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn the_webmcp_script_reaches_documents_and_the_listing() {
+        let addr = start_server_with(setup(), None, None, &["webmcp"]);
+        // A rendered document.
+        let (_, doc, _) = http_get(addr, "/a.md", "test-agent", None);
+        assert!(doc.contains("registerTool"), "missing on a document page");
+        // And the page most visitors see first.
+        let (_, listing, _) = http_get(addr, "/", "test-agent", None);
+        assert!(listing.contains("registerTool"), "missing on the listing");
+    }
+
+    #[test]
+    fn heading_ids_are_present_so_the_anchors_resolve() {
+        let dir = tmp_dir("anchors");
+        fs::write(dir.join("h.md"), "# Getting Started\n\ntext\n").unwrap();
+        let addr = start_server_with(dir, None, None, &["webmcp"]);
+        let (_, body, _) = http_get(addr, "/h.md", "test-agent", None);
+        assert!(body.contains(r#"id="getting-started""#), "{body}");
+    }
+
+    #[test]
+    fn documents_are_readable_through_the_endpoint() {
+        let addr = start_server_with(setup(), None, None, &["webmcp"]);
+        let body = call_tool(addr, "read_doc", r#"{"path":"a.md"}"#);
+        assert!(body.contains("Hello"), "{body}");
+    }
+
+    #[test]
+    fn the_endpoint_cannot_read_what_the_site_will_not_serve() {
+        // The same refusals the router enforces, reached through a tool call.
+        let dir = setup();
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".git/config"), "token = hunter2\n").unwrap();
+        fs::write(dir.join(".env"), "SECRET=hunter2\n").unwrap();
+        let addr = start_server_with(dir, None, None, &["webmcp"]);
+
+        for path in ["../../../etc/passwd", "/etc/passwd", ".git/config", ".env"] {
+            let body = call_tool(addr, "read_doc", &format!(r#"{{"path":"{path}"}}"#));
+            assert!(!body.contains("hunter2"), "{path} leaked: {body}");
+            assert!(body.contains("isError") || body.contains("No such document"), "{body}");
+        }
+    }
+
+    #[test]
+    fn the_endpoint_lists_documents_as_resources() {
+        let addr = start_server_with(setup(), None, None, &["webmcp"]);
+        let (status, resp) = http_post(
+            addr,
+            "/mcp",
+            &[],
+            None,
+            r#"{"jsonrpc":"2.0","id":1,"method":"resources/list"}"#,
+        );
+        assert_eq!(status, 200);
+        let body = body_of(&resp);
+        assert!(body.contains("serve-md:///a.md"), "{body}");
+        assert!(body.contains("serve-md:///page.html"), "{body}");
+        // A static asset is served but is not a document.
+        assert!(!body.contains("ignore.txt"), "{body}");
+    }
+
+    #[test]
+    fn a_fresh_server_notices_a_new_file() {
+        let dir = tmp_dir("freshhttp");
+        let names: Vec<String> = vec!["webmcp".to_string()];
+        let cfg = Config {
+            host: "127.0.0.1".into(),
+            port: 0,
+            dir: dir.clone(),
+            user: None,
+            pass: None,
+            no_open: true,
+            verbose: false,
+            plugins: plugin::Set::resolve(&names).unwrap(),
+            fresh: true,
+            fresh_interval: Duration::from_millis(50),
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let _ = serve_on(cfg, listener);
+        });
+        std::thread::sleep(Duration::from_millis(30));
+
+        fs::write(dir.join("late.md"), "# Late\n").unwrap();
+        let mut seen = false;
+        for _ in 0..100 {
+            let (_, body, _) = http_get(addr, "/", "curl", None);
+            if body.contains("late.md") {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(seen, "the watcher never surfaced late.md in the listing");
     }
 }
