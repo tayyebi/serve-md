@@ -263,17 +263,20 @@ Download a binary from [releases](https://github.com/tayyebi/serve-md/releases):
 Or:
 
 ```sh
-brew install tayyebi/tap/serve-md
-cargo binstall serve-md          # fetches the release binary, no build
-cargo install serve-md           # builds from source
-docker run --rm -p 8080:8080 -v "$PWD:/docs" ghcr.io/tayyebi/serve-md
-```
-
-Or grab the binary directly:
-
-```sh
 curl -fsSLO https://github.com/tayyebi/serve-md/releases/latest/download/serve-md-linux-x86_64
 chmod +x serve-md-linux-x86_64 && sudo mv serve-md-linux-x86_64 /usr/local/bin/serve-md
+```
+
+Or build it yourself — the repo is the only prerequisite:
+
+```sh
+cargo install --git https://github.com/tayyebi/serve-md
+```
+
+A `Dockerfile` is included if you would rather run it in a container:
+
+```sh
+docker build -t serve-md . && docker run --rm -p 8080:8080 -v "$PWD:/docs" serve-md
 ```
 
 The Linux binaries are **fully static** — no libc, no interpreter, no shared
