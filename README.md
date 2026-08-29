@@ -54,7 +54,8 @@ serve-md --plugin webmcp --fresh   # ...and pick up edits while running
 ### Rendering
 
 Markdown and HTML files are rendered as semantic HTML5 with no CSS and no
-JavaScript — your browser's defaults, and nothing else. Directories resolve to
+JavaScript — your browser's defaults, and nothing else. There is no banner, no
+footer and no breadcrumb: the page is the document. Directories resolve to
 `index.html` then `index.md`; a directory without either shows a file listing.
 
 Every document has exactly one URL. Slash runs collapse, trailing slashes drop,

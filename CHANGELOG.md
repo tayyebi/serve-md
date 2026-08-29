@@ -37,6 +37,12 @@ search and read, not just a website.
 
 ### Changed
 
+- Rendered pages carry no chrome. The banner, the footer with its version and
+  `serving <path>` line, the "All files" breadcrumb above every document and
+  the "Back to all files" link on the 404 are all gone: the page is the
+  document. The listing no longer names the served directory either, which on
+  a public deploy had been printing the host's filesystem layout to every
+  visitor.
 - The file list moved from a startup-only `Vec` into a shared catalog.
 - `POST` and `OPTIONS` are accepted, on the MCP endpoint only. Every other path
   still answers `405 Method Not Allowed` with `Allow: GET, HEAD`.

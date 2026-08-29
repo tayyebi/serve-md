@@ -404,7 +404,7 @@ fn listing(
         // The listing has no Markdown to transform, so without passing the
         // head markup explicitly the `webmcp` script would reach every
         // document page and not the page most visitors land on first.
-        let body = page::listing_html(&files, &dir, &ctx.page_head());
+        let body = page::listing_html(&files, &ctx.page_head());
         respond(
             stream,
             200,
@@ -419,11 +419,10 @@ fn listing(
 
 /// The catalog entries a listing for `under` should show.
 ///
-/// The root listing stays the whole tree: it is the site's index, the target
-/// of every "All files" breadcrumb, and what `curl <base>/` is documented to
-/// return. A subdirectory listing is scoped to that directory and one level
-/// deep, so it shows what a file manager would — its own files, with nested
-/// directories left to their own listings.
+/// The root listing stays the whole tree: it is the site's index, and what
+/// `curl <base>/` is documented to return. A subdirectory listing is scoped to
+/// that directory and one level deep, so it shows what a file manager would —
+/// its own files, with nested directories left to their own listings.
 ///
 /// Entries are cloned because the snapshot is shared behind an `Arc` and the
 /// page renderers take a slice; a subdirectory's worth is a small copy.
@@ -496,13 +495,7 @@ fn serve_file(
 
     let rendered = render::to_html(kind, &src, &ctx.plugins);
     let body = match kind {
-        FileKind::Markdown => page::view_html(
-            &rel,
-            &rendered.html,
-            &rendered.head,
-            &ctx.dir,
-            ctx.catalog.current().len(),
-        ),
+        FileKind::Markdown => page::view_html(&rel, &rendered.html, &rendered.head),
         _ => rendered.html,
     };
     respond(
