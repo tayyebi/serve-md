@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest something serve-md should do
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that serve-md makes hard?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+    validations:
+      required: true
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      description: >
+        serve-md builds from one crate, ships a fully static pure-Rust binary,
+        enables nothing by default, and emits no CSS or JavaScript. See
+        CONTRIBUTING.md.
+      options:
+        - label: This can be built without adding a dependency
+        - label: This is off unless a flag turns it on

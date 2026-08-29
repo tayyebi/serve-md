@@ -1,265 +1,309 @@
 # serve-md
 
-A minimal, zero-framework **static file server** with first-class Markdown
-and HTML rendering. Every file in the served directory is reachable at its
-real path — `index.html`, `style.css`, `favicon.ico`, images, video, `.md`
-docs, all of it. `.md` and `.html` files additionally render as a clean,
-reader-friendly page for browsers and plain text for `curl`/`wget`, with
-optional HTTP Basic auth. Ships as a single **statically linked** binary with
-no runtime dependencies, and builds from just one crate (`comrak`); the
-plugins, template engine, HTML tokenizer, base64 and percent-encoding are all
-hand-rolled.
+A minimal, zero-framework **static file server** with first-class Markdown and
+HTML rendering — that also speaks **MCP**, so an AI agent can search and read
+the same documents your browser sees.
 
-## Features
-
-- **Static file server**: any file under the served directory is served at
-  its real path (`GET /style.css`, `GET /images/logo.png`, `GET
-  /favicon.ico`, ...) with a guessed `Content-Type`, byte-for-byte.
-- **Index resolution**: `GET /` (or any directory path, e.g. `GET /docs`)
-  tries `index.html`, then `index.md`, in that directory; if neither exists,
-  it falls back to a recursive listing of every file in the served tree.
-- **Canonical URLs**: every page has exactly one address, and the other
-  spellings `301` to it — `/docs/index.md` and `/docs/index.html` redirect to
-  `/docs`, a trailing slash is dropped (`/docs/` -> `/docs`, the root stays
-  `/`), and repeated slashes collapse (`//docs///b.md` -> `/docs/b.md`). Query
-  strings are carried across. An `index.md` shadowed by an `index.html` next
-  to it stays reachable at its own explicit URL.
-- **Markdown & HTML rendering**: requesting `.md`/`.markdown` or
-  `.html`/`.htm` files directly negotiates format —
-  - Browser: Markdown renders to HTML (GFM tables, strikethrough, autolinks,
-    task lists); HTML files are served as-is.
-  - Terminal (`curl`/`wget` user agent): Markdown renders to reader-friendly
-    ASCII (wrapped paragraphs, underlined headings, ASCII tables, indented
-    lists/code blocks); HTML gets its tags stripped with block-aware line
-    breaks.
-  - `Accept: text/markdown` or `Accept: text/plain` on **any** `.md`/`.html`
-    request forces that format regardless of user agent — Markdown source,
-    or converted plain text, respectively.
-- **Render plugins**: opt-in extensions to the Markdown pipeline, selected
-  with `--plugin <NAME>`. Nothing is enabled by default. Currently ships
-  `math` and `mermaid` — see below.
-- **Hidden and VCS paths are refused**, by the listing *and* by the router:
-  `.git`, `.hg`, `.svn`, `target`, `node_modules`, and any dot-prefixed name
-  (`.env`, `.htpasswd`, ...) are neither listed nor reachable by typing their
-  path. `.well-known` is the one exception, so ACME and `security.txt` still
-  work.
-- Optional HTTP Basic auth via `--user`/`--pass` (constant-time check).
-- **Path-traversal safe**: a request path is vetted as a string before the
-  filesystem is touched — every segment must be one plain file name, so
-  `..`, backslashes, control bytes, Windows drive letters and absolute
-  segments are all refused — and the resolved path is then required to sit
-  inside the served directory and to land on no forbidden name, which is
-  what stops a symlink from smuggling one in. Only origin-form targets
-  (`/path`) are routed at all.
-- **Bounded by design**: caps on live connections (503 past the ceiling),
-  request-head size, header count, path length and depth, plus read, write
-  and total header-read deadlines, so no single client can wedge the server.
-  Static files stream from disk rather than being buffered in memory.
-
-## Usage
+Point it at a folder. You get a website, a Model Context Protocol server, and a
+generated `llms.txt`, from one command and one static binary with no runtime
+dependencies.
 
 ```
-serve-md 0.4.0
-A minimal web server that lists and renders Markdown and HTML files.
+$ serve-md --plugin webmcp --dir ./docs
 
-USAGE:
-    serve-md [OPTIONS]
-
-OPTIONS:
-        --host <HOST>      Address to bind to            [default: 127.0.0.1]
-        --port <PORT>      Port to listen on             [default: 8080]
-        --dir <DIR>        Directory to serve            [default: .]
-        --user <USER>      Require Basic auth username
-        --pass <PASS>      Password for --user (or env SERVE_MD_PASSWORD)
-        --no-open          Do not open a browser on startup
-        --verbose          Log each request to stdout
-        --plugin <NAME>    Enable a render plugin (repeatable or comma-separated;
-                           none are enabled by default)
-    -h, --help             Print help
-    -V, --version          Print version
-
-PLUGINS:
-    math — render LaTeX math as MathML
-    mermaid — render mermaid flowcharts as inline SVG
-
-EXAMPLES:
-    serve-md
-    serve-md --host 0.0.0.0 --port 9000 --dir ./docs
-    serve-md --plugin math --dir ./docs
-    serve-md --plugins math,mermaid --dir ./docs
-    serve-md --user admin --pass secret
-    curl -u admin:secret http://127.0.0.1:8080/README.md
+serve-md 0.5.0
+serving: ./docs
+plugins: webmcp
+  http://127.0.0.1:8080/
+  http://127.0.0.1:8080/mcp          Model Context Protocol
+  http://127.0.0.1:8080/llms.txt     index for language models
+search: rg
 ```
 
-`--pass` is optional when `SERVE_MD_PASSWORD` is set in the environment.
+<!-- TODO: record and commit docs/demo.gif, then uncomment.
+![serve-md turning a folder of Markdown into a searchable MCP server](docs/demo.gif)
+-->
 
-## Plugins
+It builds from a single crate (`comrak`). The HTTP server, JSON parser,
+template engine, HTML tokenizer, base64 and percent-encoding are all
+hand-rolled, and the release binaries are fully static.
 
-Render plugins are compiled into the binary and enabled by name. They are
-**off by default**, so plain `serve-md` renders exactly the CommonMark it
-always has. `--plugin` is repeatable, and an unknown name is rejected at
-startup rather than silently ignored:
+---
 
+## Quick start
+
+```sh
+serve-md                      # serve the current directory, open a browser
+serve-md --dir ./docs         # serve somewhere else
+serve-md --plugin webmcp      # ...and let AI agents use it
+serve-md --plugin webmcp --fresh   # ...and pick up edits while running
 ```
-$ serve-md --plugin math --dir ./docs
-$ serve-md --plugins math,mermaid --dir ./docs
-$ serve-md --plugin nope
-error: unknown plugin: nope (available: math, mermaid)
+
+## Contents
+
+- [For humans](#for-humans) — rendering, the terminal, plugins
+- [For agents](#for-agents) — MCP, WebMCP, `llms.txt`
+- [Options](#options)
+- [Security](#security)
+- [Install](#install) · [Build](#build)
+
+---
+
+## For humans
+
+### Rendering
+
+Markdown and HTML files are rendered as semantic HTML5 with no CSS and no
+JavaScript — your browser's defaults, and nothing else. Directories resolve to
+`index.html` then `index.md`; a directory without either shows a file listing.
+
+Every document has exactly one URL. Slash runs collapse, trailing slashes drop,
+and a trailing `index.html`/`index.md` is suppressed when the shorter path
+serves the identical file. Anything else redirects, once, with `301`.
+
+### The terminal is a first-class client
+
+`curl` and `wget` get plain text, not markup:
+
+```sh
+curl localhost:8080/                          # the listing, as a table
+curl localhost:8080/guides/start.md           # rendered to 80-column text
+curl -H 'Accept: text/markdown' localhost:8080/guides/start.md   # the source
+curl -H 'Accept: text/plain'    localhost:8080/page.html         # HTML → text
 ```
 
-`--plugin` and `--plugins` are the same switch; names may be repeated or
-comma-separated.
+| Client asks for | Markdown file | HTML file |
+|---|---|---|
+| `Accept: text/markdown` | the source, unchanged | converted to Markdown |
+| `Accept: text/plain`, or a `curl`/`wget` user-agent | rendered to 80-column text | converted to text |
+| anything else | rendered HTML | served as-is |
 
-### `math` — LaTeX formulas
+### Render plugins
 
-Renders math **entirely on the server** into [MathML][mathml], which every
-current browser typesets natively. No JavaScript is served, no stylesheet or
-web font is fetched from a CDN, and the rendered page works with scripting
-disabled. The LaTeX-to-MathML converter is written from scratch — a
-recursive-descent parser over a practical subset — so this costs no
-dependencies. Four syntaxes are recognised:
+None are enabled by default; pass `--plugin <NAME>` (repeatable, or
+comma-separated).
 
-| Markdown              | Renders as       |
-| --------------------- | ---------------- |
-| `$E = mc^2$`          | inline math      |
-| `$$E = mc^2$$`        | display math     |
-| `` $`E = mc^2`$ ``    | inline math      |
-| ` ```math ` fence     | display math     |
+| Plugin | Effect |
+|---|---|
+| `math` | `$…$` and `$$…$$` become MathML, rendered by the browser natively — no KaTeX, no web fonts, no JavaScript |
+| `mermaid` | ` ```mermaid ` flowcharts become SVG, laid out server-side with a Sugiyama algorithm — no Mermaid.js |
+| `webmcp` | the agent surface: `/mcp`, `/llms.txt`, and in-browser WebMCP |
 
-| Supported | Notes |
-| --------- | ----- |
-| Scripts | `x^2`, `x_i`, `x_i^2`, braced groups `x^{10}` |
-| Fractions and roots | `\frac`, `\dfrac`, `\tfrac`, `\sqrt`, `\sqrt[n]` |
-| Big operators | `\sum`, `\prod`, `\int`, `\oint`, `\bigcup`, `\lim`, … — limits stack above/below in display mode, beside in inline |
-| Delimiters | `\left(` … `\right)`, including `[`, `\{`, `\langle`, `\lceil`, `\lfloor`, `\left.` |
-| Text and fonts | `\text`, `\mathrm`, `\mathbf`, `\mathbb`, `\mathcal`, `\mathsf`, `\mathtt`, `\mathfrak` |
-| Functions | `\sin`, `\cos`, `\log`, `\exp`, `\det`, … set upright |
-| Symbols | ~150: Greek, relations, arrows, set theory, `\infty`, `\partial`, `\nabla`, … |
-| Spacing | `\,`, `\;`, `\!`, `\quad`, `\qquad` |
+Both `math` and `mermaid` render **server-side**, so pages stay script-free and
+work with JavaScript disabled.
 
-**Not supported**: matrices and `\begin{…}` environments, alignment (`&`, `\\`),
-macro definitions, and colour. A formula using them fails to parse and is left
-as visible LaTeX source rather than rendered wrong.
+---
 
-The original LaTeX is preserved inside the MathML as an
-`<annotation encoding="application/x-tex">`, so formulas stay copy-pasteable
-and readable to screen readers.
+## For agents
 
-Terminal and `Accept: text/markdown` clients receive the LaTeX source with its
-delimiters intact, so `curl` output can be pasted straight back into a `.md`
-file.
+Everything in this section requires `--plugin webmcp`. Without it, serve-md is
+exactly the file server described above and none of these routes exist.
 
-[mathml]: https://developer.mozilla.org/en-US/docs/Web/MathML
+### The MCP endpoint
 
-### `mermaid` — flowcharts
+`POST /mcp` is a [Model Context Protocol][mcp] server over Streamable HTTP.
 
-Mermaid is a JavaScript library; this is a from-scratch renderer for the
-**flowchart** subset of its syntax, so diagrams arrive already drawn and the
-page ships no script. A ```` ```mermaid ```` fence is parsed into a graph, laid
-out with a layered (Sugiyama-style) algorithm — longest-path ranking over the
-DAG left after cycle-closing edges are set aside, then median-heuristic
-crossing reduction — and written out as inline SVG that scales with the page
-and follows the reader's light/dark preference.
+It implements revision **2026-07-28**, whose stateless core — no `initialize`
+handshake, no session id, no SSE stream required — is a natural fit for a
+server that keeps no per-client state. It also answers the older
+`initialize`-based revisions (2025-03-26 through 2025-11-25), because most
+clients in the field still open with those.
 
-````
-```mermaid
-flowchart LR
-    A[Start] --> B{Ready?}
-    B -->|yes| C([Ship])
-    B -->|no| D[(Queue)]
-    D -.-> A
+**Claude Desktop / Claude Code**
+
+```jsonc
+// claude_desktop_config.json
+{
+  "mcpServers": {
+    "my-docs": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
 ```
-````
 
-| Supported | Notes |
-| --------- | ----- |
-| `flowchart` / `graph` | directions `TD`, `TB`, `BT`, `LR`, `RL` |
-| Node shapes | `[rect]`, `(round)`, `([stadium])`, `((circle))`, `{diamond}`, `{{hexagon}}`, `[[subroutine]]`, `[(cylinder)]` |
-| Link styles | `-->`, `---`, `-.->`, `-.-`, `==>`, `===` |
-| Edge labels | `A -->\|label\| B` |
-| Other | `%%` comments, `;` separators, chains (`A --> B --> C`), self-loops, cycles |
+**Cursor** — `.cursor/mcp.json`, same shape. **VS Code** — `.vscode/mcp.json`:
 
-**Not supported**, by design — anything unrecognised is left as a plain code
-block rather than rendered wrong: subgraphs, other diagram types (sequence,
-class, state, gantt, pie, ...), `<br/>` inside labels, and the `-- label -->`
-inline label form. `style`/`classDef`/`class`/`click` statements are skipped.
-
-Because there is no font engine, label widths are computed from a built-in
-Helvetica/Arial metrics table, which is what the SVG's font stack resolves to
-on virtually every platform.
-
-### Adding a plugin
-
-Implement the `Plugin` trait in `src/plugin/` and add one line to `REGISTRY`
-in [`src/plugin/mod.rs`](src/plugin/mod.rs). The trait offers three hooks:
-`configure` (turn on parser extensions), `transform` (rewrite the AST before
-HTML rendering), and `head` (contribute `<head>` markup, emitted only on pages
-the plugin actually changed).
-
-## Terminal examples
-
+```jsonc
+{
+  "servers": {
+    "my-docs": { "type": "http", "url": "http://localhost:8080/mcp" }
+  }
+}
 ```
-# list files (or serve index.html/index.md if present)
-$ curl http://127.0.0.1:8080/
 
-# view a markdown file (rendered to ASCII: wrapped text, tables, headings)
-$ curl http://127.0.0.1:8080/docs/guide.md
+Or from the shell:
 
-# force raw markdown source regardless of client
-$ curl -H 'Accept: text/markdown' http://127.0.0.1:8080/docs/guide.md
-
-# with --plugin math, formulas reach terminals as LaTeX and browsers as MathML
-$ curl http://127.0.0.1:8080/notes.md | grep 'E = mc'
-The identity $E = mc^2$ links mass and energy.
-
-# diagrams stay readable as source in a terminal, and render as SVG in a browser
-$ curl -H 'Accept: text/markdown' http://127.0.0.1:8080/design.md
-
-# static assets are served as-is
-$ curl http://127.0.0.1:8080/favicon.ico -o favicon.ico
+```sh
+curl -s localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/list' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
+
+#### Tools
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `search_docs` | `query`, `limit?`, `regex?` | Matching lines with file, line number, and the heading each match sits under |
+| `read_doc` | `path`, `format?` | One document as `markdown` (default), `text`, or `html` |
+| `list_docs` | — | Every document with title, size and mtime |
+| `get_outline` | `path` | The heading tree, with anchors that resolve on the page |
+
+Search delegates to whichever tool the host already has, trying `rg`, then
+`ag`, then `grep`. If none is on `PATH`, search reports that and the other
+tools carry on working. Install [ripgrep][rg] for the best results.
+
+#### Resources
+
+Every document is also published as an MCP resource
+(`serve-md:///guides/start.md`), so a person can attach one directly in their
+client rather than hoping the model calls a tool for it.
+
+#### Discovery
+
+`GET /.well-known/mcp.json` returns a server card naming the endpoint, the
+protocol revisions supported, and the tools available.
+
+### WebMCP, in the browser
+
+Rendered pages register the same four tools with the browser's own agent
+through [WebMCP][webmcp] (`document.modelContext.registerTool()`, shipped in
+Chrome 146 and Edge 147). A visitor's in-browser agent can search your
+documentation with **no configuration at all** — no URL to paste, no
+credentials to hand over.
+
+The injected script implements nothing itself; each tool forwards to `/mcp`. So
+there is one implementation of every tool, and the browser surface cannot drift
+from the server's.
+
+This is the only JavaScript serve-md ever emits, and only under
+`--plugin webmcp`.
+
+### llms.txt
+
+`GET /llms.txt` returns an [llms.txt v2][llmstxt] index generated from the
+tree — titles and one-line summaries read from each document's own first
+heading and first sentence — and `GET /llms-full.txt` returns every document
+concatenated.
+
+**If you have written your own `llms.txt`, yours is served.** Generation only
+fills the gap when there is no file.
+
+---
+
+## Options
+
+| Flag | Default | |
+|---|---|---|
+| `--host <HOST>` | `127.0.0.1` | |
+| `--port <PORT>` | `8080` | |
+| `--dir <DIR>` | `.` | Directory to serve |
+| `--plugin <NAME>` | none | Repeatable or comma-separated |
+| `--fresh` | off | Watch for changes instead of scanning once at startup |
+| `--fresh-interval <MS>` | `1000` | How often `--fresh` re-scans |
+| `--user <USER>` | none | Require Basic auth |
+| `--pass <PASS>` | none | Or set `SERVE_MD_PASSWORD` |
+| `--no-open` | off | Do not open a browser on startup |
+| `--verbose` | off | Log each request |
+
+Run `serve-md --help` for the authoritative list.
+
+### Freshness
+
+By default the file list is read **once, at startup** — so a document added
+while the server runs is not listed until you restart. `--fresh` starts a
+watcher that re-walks the tree and picks changes up, and the website, the MCP
+tools and `llms.txt` all read from that one shared list.
+
+It watches by polling rather than by native filesystem events, which would
+require FFI and end the single-dependency, pure-Rust static build.
+
+---
+
+## Security
+
+- **Hidden and VCS paths are never served.** Any dot-prefixed name, plus
+  `.git`, `.hg`, `.svn`, `target` and `node_modules`, is refused by both the
+  listing and the router — the two share one rule, so a name the listing hides
+  cannot be reached by typing its path. `.well-known` is the single exception.
+- **Path traversal is refused twice**: once as a filter on the request string
+  (`..`, `.`, backslashes, control bytes, drive letters, UNC prefixes), and
+  again after resolution, so a symlink cannot smuggle a path back out. Every
+  refusal is an indistinguishable `404`.
+- **Search cannot escape the tree.** Every hit from `rg`/`ag`/`grep` is checked
+  against the served file list before it is returned, so a search for
+  `password` can never surface a line of `.git/config` or `.env`. The search
+  tool is invoked with `Command::new`, never a shell, and the query is passed
+  after `-e`/`--` as a literal string by default.
+- **The MCP endpoint exposes nothing extra.** It reads the same files the
+  website serves, through the same path resolution, behind the same
+  `--user`/`--pass` if you set it.
+- **Bounded by design**: a connection cap, a header size and count cap, a
+  request body cap, path length and depth caps, a search timeout, and read,
+  write and header deadlines. Static files stream rather than buffer.
+
+Serving publicly? Set `--user`/`--pass`, or put it behind a reverse proxy that
+terminates TLS. serve-md speaks plain HTTP only.
+
+---
 
 ## Install
 
-Download a binary from [releases][releases] and run it — there is nothing to
-install alongside it.
+Download a binary from [releases](https://github.com/tayyebi/serve-md/releases):
 
-| Binary | Target |
-| ------ | ------ |
-| `serve-md-linux-x86_64` | `x86_64-unknown-linux-musl` |
-| `serve-md-linux-aarch64` | `aarch64-unknown-linux-musl` |
-| `serve-md-windows-x86_64.exe` | `x86_64-pc-windows-msvc` |
+| Platform | Asset |
+|---|---|
+| Linux x86-64 | `serve-md-linux-x86_64` |
+| Linux ARM64 | `serve-md-linux-aarch64` |
+| Windows x86-64 | `serve-md-windows-x86_64.exe` |
 
-Every binary is linked statically — no shared libraries, no dynamic loader, no
-runtime to install — so it runs on any kernel of its architecture, however old
-the distribution. CI asserts this on every release: a Linux binary carrying a
-`NEEDED` entry or a program interpreter fails the build.
+Or:
 
-[releases]: https://github.com/tayyebi/serve-md/releases
+```sh
+brew install tayyebi/tap/serve-md
+cargo binstall serve-md          # fetches the release binary, no build
+cargo install serve-md           # builds from source
+docker run --rm -p 8080:8080 -v "$PWD:/docs" ghcr.io/tayyebi/serve-md
+```
+
+Or grab the binary directly:
+
+```sh
+curl -fsSLO https://github.com/tayyebi/serve-md/releases/latest/download/serve-md-linux-x86_64
+chmod +x serve-md-linux-x86_64 && sudo mv serve-md-linux-x86_64 /usr/local/bin/serve-md
+```
+
+The Linux binaries are **fully static** — no libc, no interpreter, no shared
+objects. CI asserts this on every release. They run on Alpine, on distroless,
+and in `FROM scratch`.
+
+> One caveat for minimal images: `search_docs` needs `rg`, `ag` or `grep` on
+> `PATH`. A `scratch` image has none. The published image is Alpine with
+> ripgrep for exactly this reason.
 
 ## Build
 
-```
+```sh
 cargo build --release
+cargo test
 ```
 
-For a static Linux binary matching the released ones:
+No C toolchain is needed even for the musl targets — the dependency tree is
+pure Rust.
 
-```
-rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl
-```
+## Contributing
 
-GitHub Actions runs `clippy`, tests and a release build on every push. Pushing a
-`v*` tag builds the release binaries and attaches them to a GitHub release; the
-same workflow can be run manually from the Actions tab to test a build without
-tagging.
-
-```
-git tag v0.4.0
-git push origin v0.4.0
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md). Adding a plugin is one file in
+`src/plugin/` and one line in `REGISTRY`.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
+
+[mcp]: https://modelcontextprotocol.io/specification/2026-07-28
+[webmcp]: https://github.com/webmachinelearning/webmcp
+[llmstxt]: https://llmstxt.org/
+[rg]: https://github.com/BurntSushi/ripgrep

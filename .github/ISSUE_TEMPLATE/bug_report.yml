@@ -1,0 +1,46 @@
+name: Bug report
+description: Something does not work the way it should
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      description: The exact serve-md invocation.
+      placeholder: serve-md --plugin webmcp --dir ./docs
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `serve-md --version`.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: macOS 15 arm64 / Ubuntu 24.04 x86-64 / Windows 11
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output
+      description: Anything from `--verbose`, or the request and response.
+      render: shell
+  - type: checkboxes
+    id: agent
+    attributes:
+      label: Is this about the agent surface?
+      options:
+        - label: It involves `/mcp`, `/llms.txt`, WebMCP, or `search_docs`
+        - label: I have `rg`, `ag` or `grep` on PATH (search needs one)
