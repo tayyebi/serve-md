@@ -38,7 +38,12 @@ pub struct FileEntry {
 /// Directory names never listed and never served: version-control metadata
 /// and build output, which routinely hold credentials, tokens and the full
 /// history of a project.
-const SKIP_DIRS: &[&str] = &[".git", ".hg", ".svn", "target", "node_modules"];
+///
+/// Public because `search` passes the same list to the external search tool as
+/// exclusions. That is a performance measure and a second line of defence, not
+/// the guarantee — hits are still checked against the catalog — but the two
+/// must at least name the same directories.
+pub const SKIP_DIRS: &[&str] = &[".git", ".hg", ".svn", "target", "node_modules"];
 
 /// The one hidden path a static server is expected to hand out.
 const HIDDEN_ALLOWED: &[&str] = &[".well-known"];

@@ -1,6 +1,7 @@
 use crate::plugin;
 use std::env;
 use std::path::PathBuf;
+use std::time::Duration;
 
 pub struct Config {
     pub host: String,
@@ -11,7 +12,22 @@ pub struct Config {
     pub no_open: bool,
     pub verbose: bool,
     pub plugins: plugin::Set,
+    /// Watch the tree for changes instead of scanning once at startup.
+    pub fresh: bool,
+    /// How often the `--fresh` watcher re-walks the tree.
+    pub fresh_interval: Duration,
 }
+
+/// How often `--fresh` re-scans when no interval is given.
+///
+/// A second is well under the time it takes to alt-tab to a browser and
+/// reload, so an edit appears to be picked up instantly, while still costing
+/// one directory walk per second on a tree small enough to serve from memory.
+const DEFAULT_FRESH_INTERVAL_MS: u64 = 1000;
+
+/// A floor on `--fresh-interval`. Below this the watcher would spend more time
+/// walking the tree than the server spends answering requests.
+const MIN_FRESH_INTERVAL_MS: u64 = 50;
 
 pub enum ParseOutcome {
     Run(Config),
@@ -36,7 +52,11 @@ OPTIONS:
         --pass <PASS>      Password for --user (or env SERVE_MD_PASSWORD)
         --no-open          Do not open a browser on startup
         --verbose          Log each request to stdout
-        --plugin <NAME>    Enable a render plugin (repeatable or comma-separated;
+        --fresh            Watch the directory and pick up changes while running
+                           (without it the file list is read once, at startup)
+        --fresh-interval <MS>
+                           How often --fresh re-scans      [default: {interval}]
+        --plugin <NAME>    Enable a plugin (repeatable or comma-separated;
                            none are enabled by default)
     -h, --help             Print help
     -V, --version          Print version
@@ -49,10 +69,19 @@ EXAMPLES:
     serve-md --host 0.0.0.0 --port 9000 --dir ./docs
     serve-md --plugin math --dir ./docs
     serve-md --plugins math,mermaid --dir ./docs
+    serve-md --plugin webmcp --fresh --dir ./docs
     serve-md --user admin --pass secret
     curl -u admin:secret http://127.0.0.1:8080/README.md
+
+AGENTS:
+    With --plugin webmcp, the server also answers at:
+      POST /mcp          Model Context Protocol (tools + resources)
+      GET  /llms.txt     generated index of the documents, unless one exists
+      GET  /llms-full.txt  every document, concatenated
+    Search needs one of `rg`, `ag` or `grep` on PATH.
 ",
-        version = env!("CARGO_PKG_VERSION")
+        version = env!("CARGO_PKG_VERSION"),
+        interval = DEFAULT_FRESH_INTERVAL_MS
     )
 }
 
@@ -64,6 +93,8 @@ pub fn parse(args: &[String]) -> Result<ParseOutcome, String> {
     let mut pass: Option<String> = None;
     let mut no_open = false;
     let mut verbose = false;
+    let mut fresh = false;
+    let mut fresh_interval_ms = DEFAULT_FRESH_INTERVAL_MS;
     let mut plugin_names: Vec<String> = Vec::new();
 
     let mut i = 0;
@@ -78,6 +109,14 @@ pub fn parse(args: &[String]) -> Result<ParseOutcome, String> {
             }
             "--verbose" => {
                 verbose = true;
+                i += 1;
+            }
+            "--fresh" => {
+                fresh = true;
+                i += 1;
+            }
+            "--fresh-interval" => {
+                fresh_interval_ms = interval(&value(args, &mut i, "--fresh-interval")?)?;
                 i += 1;
             }
             "--host" => {
@@ -118,6 +157,8 @@ pub fn parse(args: &[String]) -> Result<ParseOutcome, String> {
                     user = Some(v.to_string());
                 } else if let Some(v) = arg.strip_prefix("--pass=") {
                     pass = Some(v.to_string());
+                } else if let Some(v) = arg.strip_prefix("--fresh-interval=") {
+                    fresh_interval_ms = interval(v)?;
                 } else if let Some(v) = arg
                     .strip_prefix("--plugin=")
                     .or_else(|| arg.strip_prefix("--plugins="))
@@ -153,7 +194,24 @@ pub fn parse(args: &[String]) -> Result<ParseOutcome, String> {
         no_open,
         verbose,
         plugins,
+        fresh,
+        fresh_interval: Duration::from_millis(fresh_interval_ms),
     }))
+}
+
+/// Parses and floors a `--fresh-interval`. Rejected here rather than clamped
+/// silently, so `--fresh-interval 0` is reported as a mistake instead of
+/// quietly becoming something else.
+fn interval(v: &str) -> Result<u64, String> {
+    let ms: u64 = v
+        .parse()
+        .map_err(|_| format!("invalid --fresh-interval: {v}"))?;
+    if ms < MIN_FRESH_INTERVAL_MS {
+        return Err(format!(
+            "--fresh-interval must be at least {MIN_FRESH_INTERVAL_MS}ms (got {ms})"
+        ));
+    }
+    Ok(ms)
 }
 
 /// Accepts both `--plugin a --plugin b` and `--plugins a,b`.
@@ -198,6 +256,41 @@ mod tests {
         assert!(c.pass.is_none());
         assert!(!c.no_open);
         assert!(c.plugins.is_empty(), "plugins are opt-in");
+        assert!(!c.fresh, "the catalog is startup-only unless asked otherwise");
+        assert_eq!(
+            c.fresh_interval,
+            Duration::from_millis(DEFAULT_FRESH_INTERVAL_MS)
+        );
+    }
+
+    #[test]
+    fn fresh_flags() {
+        assert!(run(&["--fresh"]).fresh);
+        assert_eq!(
+            run(&["--fresh", "--fresh-interval", "250"]).fresh_interval,
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            run(&["--fresh-interval=2000"]).fresh_interval,
+            Duration::from_millis(2000)
+        );
+    }
+
+    #[test]
+    fn a_pointless_fresh_interval_is_refused_rather_than_clamped() {
+        assert!(parse(&args(&["--fresh-interval", "0"])).is_err());
+        assert!(parse(&args(&["--fresh-interval", "10"])).is_err());
+        assert!(parse(&args(&["--fresh-interval", "abc"])).is_err());
+        assert!(parse(&args(&["--fresh-interval"])).is_err());
+    }
+
+    #[test]
+    fn help_documents_the_agent_surface() {
+        let h = help();
+        assert!(h.contains("--fresh"));
+        assert!(h.contains("POST /mcp"));
+        assert!(h.contains("/llms.txt"));
+        assert!(h.contains("webmcp"));
     }
 
     #[test]

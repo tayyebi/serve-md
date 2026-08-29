@@ -5,10 +5,15 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn listing_html(files: &[FileEntry], dir: &Path) -> String {
+/// `head` is extra `<head>` markup contributed by render plugins.
+///
+/// Passed in rather than derived here because the listing renders no Markdown
+/// of its own: a plugin that contributes markup to every page — `webmcp` —
+/// would otherwise miss the page most visitors see first.
+pub fn listing_html(files: &[FileEntry], dir: &Path, head: &str) -> String {
     let dir_str = dir.display().to_string();
     let body = body_html(files, &dir_str);
-    render_page("Files", &body, "", files.len(), &dir_str)
+    render_page("Files", &body, head, files.len(), &dir_str)
 }
 
 /// `head` is extra `<head>` markup contributed by render plugins; empty for
@@ -28,7 +33,9 @@ pub fn view_html(
     render_page(rel, &body, head, file_count, &dir_str)
 }
 
-pub fn listing_plain(files: &[FileEntry], dir: &Path) -> String {
+/// The listing a terminal client sees. `mcp` says whether to mention the
+/// agent-facing endpoints, which exist only under `--plugin webmcp`.
+pub fn listing_plain(files: &[FileEntry], dir: &Path, mcp: bool) -> String {
     let mut out = String::new();
     out.push_str(&format!(
         "serve-md {} · {} file(s) in {}\n",
@@ -52,8 +59,12 @@ pub fn listing_plain(files: &[FileEntry], dir: &Path) -> String {
         out.push_str(&format_time(f.modified));
         out.push('\n');
     }
-    out.push_str("\nview a file:        curl <base>/<path>\n");
+    out.push_str("\nview a file:         curl <base>/<path>\n");
     out.push_str("force markdown/text: curl -H 'Accept: text/markdown' <base>/<path>\n");
+    if mcp {
+        out.push_str("index for models:    curl <base>/llms.txt\n");
+        out.push_str("mcp endpoint:        POST <base>/mcp\n");
+    }
     out
 }
 
@@ -167,6 +178,26 @@ mod tests {
     }
 
     #[test]
+    fn listing_plain_mentions_the_agent_routes_only_when_enabled() {
+        let files = vec![FileEntry {
+            rel: "a.md".into(),
+            size: 1,
+            modified: SystemTime::UNIX_EPOCH,
+        }];
+        let off = listing_plain(&files, Path::new("/tmp"), false);
+        assert!(!off.contains("/mcp"));
+        let on = listing_plain(&files, Path::new("/tmp"), true);
+        assert!(on.contains("POST <base>/mcp"));
+        assert!(on.contains("/llms.txt"));
+    }
+
+    #[test]
+    fn listing_html_carries_plugin_head_markup() {
+        let out = listing_html(&[], Path::new("/tmp"), "<script>x()</script>");
+        assert!(out.contains("<script>x()</script>"));
+    }
+
+    #[test]
     fn listing_plain_is_terminal_friendly() {
         let mut files = vec![
             FileEntry {
@@ -181,7 +212,7 @@ mod tests {
             },
         ];
         files.sort_by_cached_key(|f| f.rel.clone());
-        let out = listing_plain(&files, Path::new("/tmp/x"));
+        let out = listing_plain(&files, Path::new("/tmp/x"), false);
         assert!(out.starts_with("serve-md "));
         assert!(out.contains("a.md"));
         assert!(out.contains("docs/guide.md"));
@@ -196,7 +227,7 @@ mod tests {
             size: 1,
             modified: SystemTime::UNIX_EPOCH,
         }];
-        let out = listing_html(&files, Path::new("/tmp"));
+        let out = listing_html(&files, Path::new("/tmp"), "");
         assert!(out.contains("a&lt;b&gt;.md"));
         assert!(!out.contains("a<b>.md"));
     }
@@ -217,7 +248,7 @@ mod tests {
 
     #[test]
     fn pages_without_plugins_have_no_head_markup() {
-        let out = listing_html(&[], Path::new("/tmp"));
+        let out = listing_html(&[], Path::new("/tmp"), "");
         assert!(!out.contains("<style"));
     }
 }

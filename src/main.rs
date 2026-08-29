@@ -1,14 +1,20 @@
 mod ascii;
 mod auth;
+mod catalog;
 mod cli;
 mod convert;
+mod docmeta;
 mod encoding;
 mod http;
+mod json;
+mod llms;
+mod mcp;
 mod mime;
 mod page;
 mod plugin;
 mod render;
 mod scanner;
+mod search;
 mod template;
 
 use cli::ParseOutcome;

@@ -1,11 +1,12 @@
 [package]
 name = "serve-md"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
-description = "A minimal web server that lists and renders Markdown and HTML files."
+description = "A minimal web server that renders Markdown and HTML — and speaks MCP, so AI agents can search it."
 license = "MIT"
 repository = "https://github.com/tayyebi/serve-md"
-keywords = ["markdown", "server", "docs", "web"]
+readme = "README.md"
+keywords = ["markdown", "mcp", "server", "docs", "ai"]
 categories = ["command-line-utilities", "web-programming"]
 
 [dependencies]
@@ -15,3 +16,20 @@ comrak = { version = "0.54", default-features = false }
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# `cargo binstall serve-md` fetches a release binary instead of building.
+#
+# The release workflow publishes bare, unarchived binaries, so every target
+# needs its own URL: `pkg-fmt = "bin"` tells binstall the download *is* the
+# executable rather than an archive to unpack.
+[package.metadata.binstall]
+pkg-fmt = "bin"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/serve-md-linux-x86_64"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/serve-md-linux-aarch64"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/serve-md-windows-x86_64.exe"
