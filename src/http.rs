@@ -364,7 +364,38 @@ fn route(
     match resolve(&ctx.dir, rel) {
         Resolved::File(full, kind) => serve_file(ctx, stream, &full, kind, terminal, &req.accept, is_head),
         Resolved::Listing(under) => listing(ctx, stream, &under, terminal, is_head),
-        Resolved::NotFound => not_found(stream, terminal, is_head),
+        Resolved::NotFound => match literal_escape_target(&ctx.dir, target_path, &decoded) {
+            Some(canonical) => redirect(stream, &canonical, query, is_head),
+            None => not_found(stream, terminal, is_head),
+        },
+    }
+}
+
+/// The canonical path for a request whose escapes should have been literal
+/// text, or `None` when there is no such file.
+///
+/// A file can be named `%d8%a2.md` — WordPress exports do exactly this, saving
+/// a percent-encoded slug as a filename. Its correct URL double-encodes the
+/// percent signs, but every link written to it says `%d8%a2.md`, which decodes
+/// to a name that is not on disk. Rather than serve one document under two
+/// spellings, the wrong one redirects to the right one, the same answer this
+/// server already gives a trailing slash or a redundant `index.md`.
+///
+/// The returned path is *undecoded* on purpose: `redirect` percent-encodes it,
+/// which turns each `%` into `%25` and yields the double-encoded canonical
+/// form. Requesting that decodes back to the name on disk, so the redirect
+/// resolves in one hop and cannot loop.
+fn literal_escape_target(root: &Path, raw: &str, decoded: &str) -> Option<String> {
+    // No escapes means decoding changed nothing and this cannot apply.
+    if raw == decoded || !raw.starts_with('/') {
+        return None;
+    }
+    let rel = raw.strip_prefix('/').unwrap_or(raw);
+    // Vetted by the same `resolve` the website uses, so a literal-escape path
+    // gets no reach a normal one would not.
+    match resolve(root, rel) {
+        Resolved::NotFound => None,
+        _ => Some(raw.to_string()),
     }
 }
 
@@ -1519,6 +1550,58 @@ mod tests {
         let (status, resp, _) = http_get(addr, "/my%20docs/index.md", "test-agent", None);
         assert_eq!(status, 301);
         assert_eq!(location(&resp), "/my%20docs");
+    }
+
+    #[test]
+    fn a_literal_percent_filename_redirects_to_its_canonical_url() {
+        // What a WordPress export leaves on disk: the percent-encoded slug
+        // saved verbatim as the filename.
+        let dir = tmp_dir("literal-escape");
+        fs::write(dir.join("%d8%a2.md"), "# Persian slug\n").unwrap();
+        let addr = start_server(dir, None, None);
+
+        // The spelling every generated link uses. It decodes to a name that is
+        // not on disk, so it is not this document's URL -- but it points
+        // unambiguously at it.
+        let (status, resp, _) = http_get(addr, "/%d8%a2.md", "test-agent", None);
+        assert_eq!(status, 301);
+        assert_eq!(location(&resp), "/%25d8%25a2.md");
+
+        // One hop, and the canonical URL serves the file.
+        let (status, body, _) = http_get(addr, "/%25d8%25a2.md", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(body.contains("Persian slug"));
+    }
+
+    #[test]
+    fn a_missing_file_still_404s_when_its_escapes_are_literal() {
+        let dir = tmp_dir("literal-escape-miss");
+        fs::write(dir.join("real.md"), "# Real\n").unwrap();
+        let addr = start_server(dir, None, None);
+
+        // Nothing on disk under either spelling: no redirect to offer, and no
+        // hint that the two readings were tried.
+        let (status, _, _) = http_get(addr, "/%d8%a2.md", "test-agent", None);
+        assert_eq!(status, 404);
+    }
+
+    #[test]
+    fn literal_escape_lookup_is_scoped_to_real_escapes() {
+        let dir = tmp_dir("literal-escape-unit");
+        fs::write(dir.join("%41.md"), "# Encoded A\n").unwrap();
+        fs::write(dir.join("A.md"), "# Plain A\n").unwrap();
+
+        // An escape that decodes to a file that exists never reaches this
+        // path, but even asked directly it reports the literal reading only
+        // when that names something.
+        assert_eq!(
+            literal_escape_target(&dir, "/%41.md", "/A.md"),
+            Some("/%41.md".to_string())
+        );
+        // A path with no escapes decoded to itself; there is no second
+        // reading to try.
+        assert_eq!(literal_escape_target(&dir, "/A.md", "/A.md"), None);
+        assert_eq!(literal_escape_target(&dir, "/%42.md", "/B.md"), None);
     }
 
     #[test]
