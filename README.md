@@ -1,12 +1,12 @@
 # serve-md
 
-A minimal, zero-framework **static file server** with first-class Markdown and
-HTML rendering — that also speaks **MCP**, so an AI agent can search and read
-the same documents your browser sees.
+serve-md turns a folder of documents into an AI-ready website.
 
-Point it at a folder. You get a website, a Model Context Protocol server, and a
-generated `llms.txt`, from one command and one static binary with no runtime
-dependencies.
+You point it at your documentation, and with one command it creates a clean website that people can read, while simultaneously giving AI agents a structured way to search and read those same documents.
+
+There is no database, cloud service, or complicated setup. It is a single lightweight application that runs wherever your documents are.
+
+Point it at a folder. You get a website, a Model Context Protocol server, and a generated `llms.txt`, from one command and one static binary with no runtime dependencies.
 
 ```
 $ serve-md --plugin webmcp --dir ./docs
