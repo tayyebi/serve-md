@@ -11,6 +11,24 @@ pub fn percent_encode_path(input: &str) -> String {
     out
 }
 
+/// Percent-encodes for an RFC 8187 `ext-value`, whose `attr-char` set is
+/// narrower than a path's: everything outside it is escaped, so the result is
+/// safe as a header parameter value.
+///
+/// Separate from [`percent_encode_path`] because that one deliberately leaves
+/// `/` alone, and a header value has no path structure to preserve.
+pub fn percent_encode_attr(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for &b in input.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'!' | b'#' | b'$' | b'&' | b'+' | b'-'
+            | b'.' | b'^' | b'_' | b'`' | b'|' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 pub fn percent_decode(input: &str) -> Result<String, ()> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -95,6 +113,14 @@ mod tests {
             assert!(!enc.contains(' '));
             assert_eq!(percent_decode(&enc).unwrap(), s);
         }
+    }
+
+    #[test]
+    fn attr_encoding_escapes_everything_outside_attr_char() {
+        assert_eq!(percent_encode_attr("Caf\u{e9} Guide"), "Caf%C3%A9%20Guide");
+        // `/` survives percent_encode_path but not this one.
+        assert_eq!(percent_encode_attr("a/b"), "a%2Fb");
+        assert_eq!(percent_encode_attr("ok-name~1"), "ok-name~1");
     }
 
     #[test]

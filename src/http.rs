@@ -7,7 +7,9 @@ use crate::llms;
 use crate::mcp;
 use crate::mime;
 use crate::page;
+use crate::docmeta;
 use crate::plugin;
+use crate::plugin::headers::{self, Repr};
 use crate::render;
 use crate::scanner::{is_forbidden_segment, FileEntry, FileKind};
 use crate::search;
@@ -89,6 +91,10 @@ struct Ctx {
     /// Whether `--plugin webmcp` was given, which gates `/mcp`, `/llms.txt`
     /// and the server card.
     mcp: bool,
+    /// Whether `--x-headers` (or `--plugin x-headers`) was given, which gates
+    /// every header below the four this server always sends, and with them
+    /// conditional-request handling.
+    xheaders: bool,
     /// The search tool found at startup, if any.
     engine: Option<search::Engine>,
     /// Connections currently being served, against `MAX_LIVE_CONNECTIONS`.
@@ -103,6 +109,17 @@ impl Ctx {
     /// including the listing, which has no Markdown to transform at all.
     fn page_head(&self) -> String {
         self.plugins.render_html("").head
+    }
+
+    /// The headers every response carries while `x-headers` is on, and an
+    /// empty list otherwise — which is what keeps a server started without the
+    /// plugin byte-for-byte the one it was before this existed.
+    fn base(&self) -> Vec<(String, String)> {
+        if self.xheaders {
+            vec![headers::server()]
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -121,6 +138,7 @@ fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
         _ => None,
     };
     let mcp = cfg.plugins.has("webmcp");
+    let xheaders = cfg.plugins.has("x-headers");
     // Probed once here rather than per query, so a missing search tool is
     // reported in the banner instead of at the first `search_docs` call.
     let engine = if mcp { search::detect() } else { None };
@@ -131,6 +149,7 @@ fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
         verbose: cfg.verbose,
         plugins: cfg.plugins,
         mcp,
+        xheaders,
         engine,
         live: AtomicUsize::new(0),
     });
@@ -207,6 +226,8 @@ fn handle_connection(stream: &mut TcpStream, ctx: &Ctx) -> io::Result<()> {
     let is_head = req.method == "HEAD";
     let terminal = ua_is_terminal(&req.ua);
     verbose_log(&req, terminal, ctx);
+    let base_owned = ctx.base();
+    let base = headers::borrow(&base_owned);
 
     let on_mcp = ctx.mcp && path_of(&req.target) == MCP_PATH;
 
@@ -218,22 +239,25 @@ fn handle_connection(stream: &mut TcpStream, ctx: &Ctx) -> io::Result<()> {
         if on_mcp {
             return respond(stream, 204, "No Content", "text/plain", b"", CORS, false);
         }
-        return method_not_allowed(stream, "GET, HEAD", is_head);
+        return method_not_allowed(stream, "GET, HEAD", &base, is_head);
     }
 
     if req.method == "POST" {
         if !on_mcp {
-            return method_not_allowed(stream, "GET, HEAD", is_head);
+            return method_not_allowed(stream, "GET, HEAD", &base, is_head);
         }
     } else if req.method != "GET" && req.method != "HEAD" {
-        return method_not_allowed(stream, "GET, HEAD", is_head);
+        return method_not_allowed(stream, "GET, HEAD", &base, is_head);
     }
     let auth_ok = match &ctx.auth {
         Some(a) => a.check(&req.headers),
         None => true,
     };
     if !auth_ok {
-        let extra = [("WWW-Authenticate", "Basic realm=\"serve-md\"")];
+        // No `Doc-*` and no validators here: a 401 describes nothing, and a
+        // document's title is exactly what the credentials are protecting.
+        let mut extra = vec![("WWW-Authenticate", "Basic realm=\"serve-md\"")];
+        extra.extend_from_slice(&base);
         if terminal {
             return respond(
                 stream,
@@ -263,14 +287,21 @@ fn handle_connection(stream: &mut TcpStream, ctx: &Ctx) -> io::Result<()> {
     route(ctx, stream, &req, terminal, is_head)
 }
 
-fn method_not_allowed(stream: &mut TcpStream, allow: &str, is_head: bool) -> io::Result<()> {
+fn method_not_allowed(
+    stream: &mut TcpStream,
+    allow: &str,
+    base: &[(&str, &str)],
+    is_head: bool,
+) -> io::Result<()> {
+    let mut extra = vec![("Allow", allow)];
+    extra.extend_from_slice(base);
     respond(
         stream,
         405,
         "Method Not Allowed",
         "text/plain; charset=utf-8",
         b"405 Method Not Allowed\n",
-        &[("Allow", allow)],
+        &extra,
         is_head,
     )
 }
@@ -316,6 +347,8 @@ fn route(
         Some((path, q)) => (path, Some(q)),
         None => (req.target.as_str(), None),
     };
+    let base_owned = ctx.base();
+    let base = headers::borrow(&base_owned);
     let decoded = match percent_decode(target_path) {
         Ok(d) => d,
         Err(_) => {
@@ -325,7 +358,7 @@ fn route(
                 "Bad Request",
                 "text/plain; charset=utf-8",
                 b"400 Bad Request\n",
-                &[],
+                &base,
                 is_head,
             );
         }
@@ -341,7 +374,7 @@ fn route(
             "Bad Request",
             "text/plain; charset=utf-8",
             b"400 Bad Request\n",
-            &[],
+            &base,
             is_head,
         );
     }
@@ -357,16 +390,21 @@ fn route(
 
     let canonical = canonical_path(&ctx.dir, &decoded);
     if canonical != decoded {
-        return redirect(stream, &canonical, query, is_head);
+        return redirect(stream, &canonical, query, &base, is_head);
     }
     let rel = decoded.strip_prefix('/').unwrap_or(&decoded);
 
     match resolve(&ctx.dir, rel) {
-        Resolved::File(full, kind) => serve_file(ctx, stream, &full, kind, terminal, &req.accept, is_head),
-        Resolved::Listing(under) => listing(ctx, stream, &under, terminal, is_head),
+        // `canonical` is passed down as the `rel="canonical"` link target: it
+        // is the one spelling of this URL that does not redirect, which the
+        // file's own path is not — `/index.md` bounces back to `/`.
+        Resolved::File(full, kind, meta) => {
+            serve_file(ctx, stream, req, &full, kind, &meta, &canonical, terminal, is_head)
+        }
+        Resolved::Listing(under) => listing(ctx, stream, &under, &canonical, terminal, is_head),
         Resolved::NotFound => match literal_escape_target(&ctx.dir, target_path, &decoded) {
-            Some(canonical) => redirect(stream, &canonical, query, is_head),
-            None => not_found(stream, terminal, is_head),
+            Some(canonical) => redirect(stream, &canonical, query, &base, is_head),
+            None => not_found(stream, terminal, &base, is_head),
         },
     }
 }
@@ -410,9 +448,20 @@ fn listing(
     ctx: &Ctx,
     stream: &mut TcpStream,
     under: &str,
+    canonical: &str,
     terminal: bool,
     is_head: bool,
 ) -> io::Result<()> {
+    // A listing is negotiated too — `terminal` picks the plain rendering — so
+    // it needs `Vary` as much as a document does. It gets no validator: it is
+    // assembled from the catalog rather than read from one file, and there is
+    // nothing to stat.
+    let mut owned = ctx.base();
+    if ctx.xheaders {
+        owned.push(headers::vary());
+        owned.push(headers::links(canonical, ctx.mcp));
+    }
+    let extra = headers::borrow(&owned);
     let snap = ctx.catalog.current();
     let files = files_under(&snap.files, under);
     let dir = if under.is_empty() {
@@ -428,7 +477,7 @@ fn listing(
             "OK",
             "text/plain; charset=utf-8",
             body.as_bytes(),
-            &[],
+            &extra,
             is_head,
         )
     } else {
@@ -442,7 +491,7 @@ fn listing(
             "OK",
             "text/html; charset=utf-8",
             body.as_bytes(),
-            &[],
+            &extra,
             is_head,
         )
     }
@@ -477,67 +526,193 @@ fn files_under(files: &[FileEntry], under: &str) -> Vec<FileEntry> {
 /// (`Accept: text/markdown` -> source, `Accept: text/plain` or a terminal
 /// client -> reader-friendly text, else rendered HTML) and streaming
 /// `Static` files as-is with a guessed MIME type.
+///
+/// The argument list is long because the response headers need the request
+/// (for its preconditions), the file's metadata, and the canonical URL — all
+/// of which the caller already holds. Bundling them into a struct used by one
+/// function would move the same values, not fewer.
+#[allow(clippy::too_many_arguments)]
 fn serve_file(
     ctx: &Ctx,
     stream: &mut TcpStream,
+    req: &Request,
     full: &Path,
     kind: FileKind,
+    meta: &fs::Metadata,
+    canonical: &str,
     terminal: bool,
-    accept: &str,
     is_head: bool,
 ) -> io::Result<()> {
+    let repr = representation(kind, terminal, &req.accept);
+    let mut owned = ctx.base();
+
     if kind == FileKind::Static {
-        if stream_file(stream, full, mime::guess(full), is_head)? {
+        if ctx.xheaders {
+            owned.extend(headers::validators(meta, repr));
+            owned.push((
+                "Doc-Format".to_string(),
+                headers::format_name(kind).to_string(),
+            ));
+        }
+        if let Some(answer) = conditional(ctx, stream, req, meta, repr, &owned) {
+            return answer;
+        }
+        if stream_file(stream, full, mime::guess(full), &headers::borrow(&owned), is_head)? {
             return Ok(());
         }
-        return not_found(stream, terminal, is_head);
+        return not_found(stream, terminal, &headers::borrow(&ctx.base()), is_head);
+    }
+
+    // Answered here, before the file is read and before comrak sees it:
+    // skipping the render is most of what a conditional request is worth.
+    if ctx.xheaders {
+        owned.extend(headers::validators(meta, repr));
+        owned.push(headers::vary());
+        owned.push(headers::links(canonical, ctx.mcp));
+    }
+    if let Some(answer) = conditional(ctx, stream, req, meta, repr, &owned) {
+        return answer;
     }
 
     let src = match fs::read_to_string(full) {
         Ok(r) => r,
-        Err(_) => return not_found(stream, terminal, is_head),
+        Err(_) => return not_found(stream, terminal, &headers::borrow(&ctx.base()), is_head),
     };
     let rel = display_rel(&ctx.dir, full);
 
+    if ctx.xheaders {
+        // One parse for title, word count and heading count, on top of the
+        // render's own — not three.
+        let brief = docmeta::brief(&src, &ctx.plugins.options());
+        owned.extend(headers::document(kind, &brief));
+    }
+    let extra = headers::borrow(&owned);
+
+    match repr {
+        Repr::Markdown => {
+            let body = render::to_markdown(kind, &src);
+            respond(
+                stream,
+                200,
+                "OK",
+                "text/markdown; charset=utf-8",
+                body.as_bytes(),
+                &extra,
+                is_head,
+            )
+        }
+        Repr::Text => {
+            let body = render::to_text(kind, &src, &ctx.plugins);
+            respond(
+                stream,
+                200,
+                "OK",
+                "text/plain; charset=utf-8",
+                body.as_bytes(),
+                &extra,
+                is_head,
+            )
+        }
+        // `Raw` cannot reach here: it is the `Static` branch above.
+        Repr::Html | Repr::Raw => {
+            let rendered = render::to_html(kind, &src, &ctx.plugins);
+            let body = match kind {
+                FileKind::Markdown => page::view_html(&rel, &rendered.html, &rendered.head),
+                _ => rendered.html,
+            };
+            respond(
+                stream,
+                200,
+                "OK",
+                "text/html; charset=utf-8",
+                body.as_bytes(),
+                &extra,
+                is_head,
+            )
+        }
+    }
+}
+
+/// Which representation [`serve_file`] will produce.
+///
+/// Pulled out because this decision used to *be* the branch chain in
+/// `serve_file`, and the `ETag` has to name the same one the body turns out to
+/// be. Two copies of this rule would eventually disagree, and the symptom
+/// would be a cache serving HTML to `curl`.
+fn representation(kind: FileKind, terminal: bool, accept: &str) -> Repr {
+    if kind == FileKind::Static {
+        return Repr::Raw;
+    }
     if accept_wants(accept, "text/markdown") {
-        let body = render::to_markdown(kind, &src);
-        return respond(
-            stream,
-            200,
-            "OK",
-            "text/markdown; charset=utf-8",
-            body.as_bytes(),
-            &[],
-            is_head,
-        );
+        return Repr::Markdown;
     }
     if terminal || accept_wants(accept, "text/plain") {
-        let body = render::to_text(kind, &src, &ctx.plugins);
-        return respond(
-            stream,
-            200,
-            "OK",
-            "text/plain; charset=utf-8",
-            body.as_bytes(),
-            &[],
-            is_head,
-        );
+        return Repr::Text;
     }
+    Repr::Html
+}
 
-    let rendered = render::to_html(kind, &src, &ctx.plugins);
-    let body = match kind {
-        FileKind::Markdown => page::view_html(&rel, &rendered.html, &rendered.head),
-        _ => rendered.html,
-    };
-    respond(
-        stream,
-        200,
-        "OK",
-        "text/html; charset=utf-8",
-        body.as_bytes(),
-        &[],
-        is_head,
-    )
+/// `Some(..)` when the request's preconditions are satisfied and a 304 has been
+/// written, `None` when the full response should go out.
+///
+/// Only ever `Some` while `x-headers` is on: without it no validator was ever
+/// advertised, so any `If-None-Match` a client sends is one it made up or kept
+/// from another server, and honouring it would serve nothing for a body the
+/// client does not have.
+fn conditional(
+    ctx: &Ctx,
+    stream: &mut TcpStream,
+    req: &Request,
+    meta: &fs::Metadata,
+    repr: Repr,
+    sent: &[(String, String)],
+) -> Option<io::Result<()>> {
+    if !ctx.xheaders {
+        return None;
+    }
+    let inm = header(&req.headers, "if-none-match");
+    let ims = header(&req.headers, "if-modified-since");
+    if inm.is_none() && ims.is_none() {
+        return None;
+    }
+    if !headers::matches(inm, ims, meta, repr) {
+        return None;
+    }
+    // RFC 9110 §15.4.5: a 304 repeats the headers that would have qualified
+    // the 200, minus anything describing the body. `Doc-*` is not in `sent`
+    // yet at either call site, which is the point of answering this early.
+    Some(not_modified(stream, &headers::borrow(sent)))
+}
+
+/// Case-insensitive header lookup. Field names are case-insensitive
+/// (RFC 9110 §5.1) and `read_request` keeps them exactly as the client spelled
+/// them.
+fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+/// A 304, which is the one response here that carries neither `Content-Type`
+/// nor `Content-Length`.
+///
+/// It cannot have a body (RFC 9110 §15.4.5) and the message ends at the blank
+/// line, so a `Content-Length: 0` would not be describing an empty body — it
+/// would be misdescribing the cached one, which is not empty.
+fn not_modified(stream: &mut TcpStream, extra: &[(&str, &str)]) -> io::Result<()> {
+    let mut head = String::from(
+        "HTTP/1.1 304 Not Modified\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n",
+    );
+    for (k, v) in extra {
+        head.push_str(k);
+        head.push_str(": ");
+        head.push_str(v);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    stream.flush()
 }
 
 /// Streams a file from disk to the socket instead of buffering it in memory
@@ -551,6 +726,7 @@ fn stream_file(
     stream: &mut TcpStream,
     full: &Path,
     ctype: &str,
+    extra: &[(&str, &str)],
     is_head: bool,
 ) -> io::Result<bool> {
     let Ok(file) = fs::File::open(full) else {
@@ -563,7 +739,7 @@ fn stream_file(
         return Ok(false);
     }
     let len = meta.len();
-    write_head(stream, 200, "OK", ctype, len, &[])?;
+    write_head(stream, 200, "OK", ctype, len, extra)?;
     if !is_head {
         // Capped at the length just announced: if the file grows underneath
         // us mid-copy, the body still matches its own Content-Length.
@@ -586,7 +762,15 @@ fn display_rel(root: &Path, full: &Path) -> String {
     out
 }
 
-fn not_found(stream: &mut TcpStream, terminal: bool, is_head: bool) -> io::Result<()> {
+/// `base` carries only what describes the *server*. Nothing that describes a
+/// document belongs on a 404, which by definition has none — and a validator
+/// here would invite a client to cache the absence.
+fn not_found(
+    stream: &mut TcpStream,
+    terminal: bool,
+    base: &[(&str, &str)],
+    is_head: bool,
+) -> io::Result<()> {
     if terminal {
         respond(
             stream,
@@ -594,7 +778,7 @@ fn not_found(stream: &mut TcpStream, terminal: bool, is_head: bool) -> io::Resul
             "Not Found",
             "text/plain; charset=utf-8",
             b"404 Not Found\n",
-            &[],
+            base,
             is_head,
         )
     } else {
@@ -605,7 +789,7 @@ fn not_found(stream: &mut TcpStream, terminal: bool, is_head: bool) -> io::Resul
             "Not Found",
             "text/html; charset=utf-8",
             body.as_bytes(),
-            &[],
+            base,
             is_head,
         )
     }
@@ -657,7 +841,7 @@ fn same_file(root: &Path, a: &str, b: &str) -> bool {
     let a_rel = a.strip_prefix('/').unwrap_or(a);
     let b_rel = b.strip_prefix('/').unwrap_or(b);
     match (resolve(root, a_rel), resolve(root, b_rel)) {
-        (Resolved::File(x, _), Resolved::File(y, _)) => x == y,
+        (Resolved::File(x, _, _), Resolved::File(y, _, _)) => x == y,
         _ => false,
     }
 }
@@ -669,6 +853,7 @@ fn redirect(
     stream: &mut TcpStream,
     path: &str,
     query: Option<&str>,
+    base: &[(&str, &str)],
     is_head: bool,
 ) -> io::Result<()> {
     let mut location = percent_encode_path(path);
@@ -677,13 +862,15 @@ fn redirect(
         location.push_str(q);
     }
     let body = format!("301 Moved Permanently\n{location}\n");
+    let mut extra = vec![("Location", location.as_str())];
+    extra.extend_from_slice(base);
     respond(
         stream,
         301,
         "Moved Permanently",
         "text/plain; charset=utf-8",
         body.as_bytes(),
-        &[("Location", location.as_str())],
+        &extra,
         is_head,
     )
 }
@@ -712,7 +899,15 @@ fn synthetic(
         // 2026-07-28 §"Backward Compatibility": a server implementing only
         // this revision answers GET or DELETE on the MCP endpoint with 405,
         // since the GET stream and the DELETE session teardown are gone.
-        MCP_PATH => return Some(method_not_allowed(stream, "POST, OPTIONS", is_head)),
+        MCP_PATH => {
+            let base = ctx.base();
+            return Some(method_not_allowed(
+                stream,
+                "POST, OPTIONS",
+                &headers::borrow(&base),
+                is_head,
+            ));
+        }
         LLMS_PATH => (
             llms::llms_txt(&ctx.dir, &snap, &ctx.plugins.options(), ctx.mcp),
             "text/plain; charset=utf-8",
@@ -783,7 +978,10 @@ fn server_card() -> String {
 }
 
 enum Resolved {
-    File(PathBuf, FileKind),
+    /// The metadata rides along because `resolve` has already stat'd the file
+    /// to decide it was one, and every caller that wants a `Last-Modified` or
+    /// an `ETag` would otherwise stat it a second time.
+    File(PathBuf, FileKind, fs::Metadata),
     /// A directory with no index file, named by its root-relative path —
     /// empty for the served root itself. The path is what scopes the listing
     /// to that directory instead of showing the whole tree.
@@ -801,7 +999,7 @@ enum Resolved {
 /// server's path security.
 pub(crate) fn resolve_document(root: &Path, rel: &str) -> Option<(PathBuf, FileKind)> {
     match resolve(root, rel) {
-        Resolved::File(full, kind) => Some((full, kind)),
+        Resolved::File(full, kind, _) => Some((full, kind)),
         Resolved::Listing(_) | Resolved::NotFound => None,
     }
 }
@@ -893,19 +1091,21 @@ fn resolve(root: &Path, rel: &str) -> Resolved {
     };
     if meta.is_file() {
         let kind = FileKind::from_path(&cand_c);
-        return Resolved::File(cand_c, kind);
+        return Resolved::File(cand_c, kind, meta);
     }
     if meta.is_dir() {
         for name in INDEX_CANDIDATES {
             let idx = cand_c.join(name);
-            let valid = idx.canonicalize().ok().filter(|idx_c| {
-                idx_c.starts_with(&root_c)
-                    && !lands_on_forbidden(&root_c, idx_c)
-                    && fs::metadata(idx_c).map(|m| m.is_file()).unwrap_or(false)
+            let valid = idx.canonicalize().ok().and_then(|idx_c| {
+                if !idx_c.starts_with(&root_c) || lands_on_forbidden(&root_c, &idx_c) {
+                    return None;
+                }
+                let meta = fs::metadata(&idx_c).ok().filter(fs::Metadata::is_file)?;
+                Some((idx_c, meta))
             });
-            if let Some(idx_c) = valid {
+            if let Some((idx_c, meta)) = valid {
                 let kind = FileKind::from_path(&idx_c);
-                return Resolved::File(idx_c, kind);
+                return Resolved::File(idx_c, kind, meta);
             }
         }
         return Resolved::Listing(rel.trim_matches('/').to_string());
@@ -2251,4 +2451,253 @@ mod tests {
         }
         assert!(seen, "the watcher never surfaced late.md in the listing");
     }
+
+    // ---- x-headers -------------------------------------------------------
+
+    /// One header's value from a raw response. Restricted to the head, so a
+    /// body that happens to contain `ETag:` cannot answer for one.
+    fn header_of(resp: &str, name: &str) -> Option<String> {
+        let prefix = format!("{}:", name.to_ascii_lowercase());
+        resp.lines()
+            .take_while(|l| !l.trim().is_empty())
+            .find(|l| l.to_ascii_lowercase().starts_with(&prefix))
+            .and_then(|l| l.split_once(':'))
+            .map(|(_, v)| v.trim().to_string())
+    }
+
+    fn http_get_with(
+        addr: SocketAddr,
+        path: &str,
+        ua: &str,
+        extra: &[(&str, &str)],
+    ) -> (u16, String) {
+        let mut req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nUser-Agent: {ua}\r\n");
+        for (k, v) in extra {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
+        req.push_str("\r\n");
+        http_send(addr, &req)
+    }
+
+    /// A tree with one document whose word and heading counts are unambiguous.
+    fn counted() -> PathBuf {
+        let dir = tmp_dir("counted");
+        fs::write(dir.join("h.md"), "# Header Doc\n\none two three four\n\n## Sub\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn nothing_extra_is_sent_without_the_plugin() {
+        // The constraint that matters most: a server started without this is
+        // the server it was before the plugin existed.
+        let addr = start_server(setup(), None, None);
+        let (status, resp, _) = http_get(addr, "/a.md", "Mozilla", None);
+        assert_eq!(status, 200);
+        for name in ["Server", "Last-Modified", "ETag", "Vary", "Link", "Doc-Format"] {
+            assert!(header_of(&resp, name).is_none(), "{name} leaked: {resp}");
+        }
+    }
+
+    #[test]
+    fn the_headers_describe_the_server_and_the_document() {
+        let addr = start_server_with(counted(), None, None, &["x-headers"]);
+        let (status, resp, _) = http_get(addr, "/h.md", "Mozilla", None);
+        assert_eq!(status, 200);
+        assert_eq!(
+            header_of(&resp, "Server"),
+            Some(format!("serve-md/{}", env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(header_of(&resp, "Doc-Format"), Some("markdown".to_string()));
+        assert_eq!(header_of(&resp, "Doc-Title"), Some("Header Doc".to_string()));
+        assert_eq!(header_of(&resp, "Doc-Headings"), Some("2".to_string()));
+        // "Header Doc" + "one two three four" + "Sub"
+        assert_eq!(header_of(&resp, "Doc-Words"), Some("7".to_string()));
+        assert!(header_of(&resp, "Last-Modified").unwrap().ends_with(" GMT"));
+        assert!(header_of(&resp, "ETag").unwrap().starts_with("W/\""));
+        assert_eq!(
+            header_of(&resp, "Link"),
+            Some("</h.md>; rel=\"canonical\"".to_string())
+        );
+    }
+
+    #[test]
+    fn negotiated_responses_admit_that_they_vary() {
+        let addr = start_server_with(setup(), None, None, &["x-headers"]);
+        let cases: [(&str, Option<&str>); 3] = [
+            ("Mozilla", None),
+            ("Mozilla", Some("text/markdown")),
+            ("curl/8.4", None),
+        ];
+        for (ua, accept) in cases {
+            let (_, resp, _) = http_get_accept(addr, "/a.md", ua, None, accept);
+            assert_eq!(
+                header_of(&resp, "Vary"),
+                Some("Accept, User-Agent".to_string()),
+                "{ua} {accept:?}"
+            );
+        }
+        // The listing branches on the user agent too.
+        let (_, resp, _) = http_get(addr, "/", "Mozilla", None);
+        assert_eq!(
+            header_of(&resp, "Vary"),
+            Some("Accept, User-Agent".to_string())
+        );
+    }
+
+    #[test]
+    fn each_representation_has_its_own_etag() {
+        let addr = start_server_with(setup(), None, None, &["x-headers"]);
+        let (_, html, _) = http_get(addr, "/a.md", "Mozilla", None);
+        let (_, md, _) = http_get_accept(addr, "/a.md", "Mozilla", None, Some("text/markdown"));
+        let (_, txt, _) = http_get(addr, "/a.md", "curl/8.4", None);
+        let tags: Vec<String> = [&html, &md, &txt]
+            .iter()
+            .map(|r| header_of(r, "ETag").expect("every 200 carries one"))
+            .collect();
+        let unique: std::collections::HashSet<&String> = tags.iter().collect();
+        assert_eq!(unique.len(), 3, "one URL, three bodies, three tags: {tags:?}");
+    }
+
+    #[test]
+    fn a_matching_etag_is_answered_with_304() {
+        let addr = start_server_with(setup(), None, None, &["x-headers"]);
+        let (_, first, _) = http_get(addr, "/a.md", "Mozilla", None);
+        let tag = header_of(&first, "ETag").unwrap();
+
+        let (status, resp) = http_get_with(addr, "/a.md", "Mozilla", &[("If-None-Match", &tag)]);
+        assert_eq!(status, 304, "{resp}");
+        assert_eq!(body_of(&resp), "");
+        // A 304 describes no body, so it must not claim a length for one.
+        assert!(header_of(&resp, "Content-Length").is_none(), "{resp}");
+        assert_eq!(header_of(&resp, "ETag"), Some(tag));
+        assert!(header_of(&resp, "Last-Modified").is_some());
+        // Nothing that describes the body it did not send.
+        assert!(header_of(&resp, "Doc-Title").is_none(), "{resp}");
+        assert!(header_of(&resp, "Content-Type").is_none(), "{resp}");
+    }
+
+    #[test]
+    fn a_date_answers_304_only_when_it_is_not_older_than_the_file() {
+        let addr = start_server_with(setup(), None, None, &["x-headers"]);
+        let (_, first, _) = http_get(addr, "/a.md", "Mozilla", None);
+        let lm = header_of(&first, "Last-Modified").unwrap();
+
+        let (status, resp) = http_get_with(addr, "/a.md", "Mozilla", &[("If-Modified-Since", &lm)]);
+        assert_eq!(status, 304, "{resp}");
+
+        let (status, _) = http_get_with(
+            addr,
+            "/a.md",
+            "Mozilla",
+            &[("If-Modified-Since", "Thu, 01 Jan 1970 00:00:00 GMT")],
+        );
+        assert_eq!(status, 200);
+
+        // An unparseable date serves the body rather than guessing.
+        let (status, _) =
+            http_get_with(addr, "/a.md", "Mozilla", &[("If-Modified-Since", "yesterday")]);
+        assert_eq!(status, 200);
+    }
+
+    #[test]
+    fn the_etag_beats_the_date_when_both_are_sent() {
+        // RFC 9110 §13.1.3: the date is ignored outright when a tag is present.
+        let addr = start_server_with(setup(), None, None, &["x-headers"]);
+        let (_, first, _) = http_get(addr, "/a.md", "Mozilla", None);
+        let lm = header_of(&first, "Last-Modified").unwrap();
+        let (status, resp) = http_get_with(
+            addr,
+            "/a.md",
+            "Mozilla",
+            &[("If-None-Match", "W/\"stale\""), ("If-Modified-Since", &lm)],
+        );
+        assert_eq!(status, 200, "{resp}");
+    }
+
+    #[test]
+    fn a_validator_is_ignored_by_a_server_that_never_issued_one() {
+        let addr = start_server(setup(), None, None);
+        let (status, _) = http_get_with(addr, "/a.md", "Mozilla", &[("If-None-Match", "*")]);
+        assert_eq!(status, 200, "no plugin, no revalidation");
+    }
+
+    #[test]
+    fn errors_name_the_server_and_describe_nothing_else() {
+        let addr = start_server_with(setup(), None, None, &["x-headers"]);
+        let (status, resp, _) = http_get(addr, "/nope.md", "Mozilla", None);
+        assert_eq!(status, 404);
+        assert!(header_of(&resp, "Server").is_some());
+        for name in ["Last-Modified", "ETag", "Doc-Format", "Doc-Title", "Link"] {
+            assert!(header_of(&resp, name).is_none(), "{name} on a 404: {resp}");
+        }
+    }
+
+    #[test]
+    fn the_agent_surface_is_linked_only_when_it_is_served() {
+        let addr = start_server_with(setup(), None, None, &["x-headers"]);
+        let (_, resp, _) = http_get(addr, "/a.md", "Mozilla", None);
+        let link = header_of(&resp, "Link").unwrap();
+        assert!(!link.contains("/mcp"), "{link}");
+        assert!(!link.contains("/llms.txt"), "{link}");
+
+        let addr = start_server_with(setup(), None, None, &["x-headers", "webmcp"]);
+        let (_, resp, _) = http_get(addr, "/a.md", "Mozilla", None);
+        let link = header_of(&resp, "Link").unwrap();
+        assert!(link.contains("</llms.txt>; rel=\"alternate\""), "{link}");
+        assert!(link.contains("</mcp>; rel=\"service-desc\""), "{link}");
+    }
+
+    #[test]
+    fn a_title_is_sanitised_before_it_becomes_a_header() {
+        let dir = tmp_dir("titles");
+        // A setext heading, so the title really does span two source lines and
+        // the soft break really does reach `inline_text`.
+        fs::write(dir.join("evil.md"), "Caf\u{e9}\nX-Injected: yes\n---\n\nbody\n").unwrap();
+        let addr = start_server_with(dir, None, None, &["x-headers"]);
+        let (status, resp, _) = http_get(addr, "/evil.md", "Mozilla", None);
+        assert_eq!(status, 200);
+        assert!(header_of(&resp, "X-Injected").is_none(), "{resp}");
+        assert_eq!(
+            header_of(&resp, "Doc-Title"),
+            Some("Caf X-Injected: yes".to_string())
+        );
+        assert_eq!(
+            header_of(&resp, "Doc-Title*"),
+            Some("UTF-8''Caf%C3%A9%20X-Injected%3A%20yes".to_string())
+        );
+    }
+
+    #[test]
+    fn a_static_asset_is_validated_but_not_described() {
+        let addr = start_server_with(setup(), None, None, &["x-headers"]);
+        let (status, resp, _) = http_get(addr, "/ignore.txt", "Mozilla", None);
+        assert_eq!(status, 200);
+        assert_eq!(header_of(&resp, "Doc-Format"), Some("static".to_string()));
+        assert!(header_of(&resp, "ETag").is_some());
+        assert!(header_of(&resp, "Last-Modified").is_some());
+        assert!(header_of(&resp, "Doc-Title").is_none());
+        // Nothing was negotiated, so there is nothing to vary on.
+        assert!(header_of(&resp, "Vary").is_none(), "{resp}");
+
+        let tag = header_of(&resp, "ETag").unwrap();
+        let (status, resp) =
+            http_get_with(addr, "/ignore.txt", "Mozilla", &[("If-None-Match", &tag)]);
+        assert_eq!(status, 304, "{resp}");
+    }
+
+    #[test]
+    fn a_head_request_carries_the_same_headers_as_the_get() {
+        let addr = start_server_with(counted(), None, None, &["x-headers"]);
+        let (_, get, _) = http_get(addr, "/h.md", "Mozilla", None);
+        let (status, head) = http_send(
+            addr,
+            "HEAD /h.md HTTP/1.1\r\nHost: localhost\r\nUser-Agent: Mozilla\r\n\r\n",
+        );
+        assert_eq!(status, 200);
+        assert_eq!(body_of(&head), "", "a HEAD has no body");
+        for name in ["Server", "ETag", "Last-Modified", "Doc-Title", "Doc-Words", "Link"] {
+            assert_eq!(header_of(&head, name), header_of(&get, name), "{name}");
+        }
+    }
+
 }

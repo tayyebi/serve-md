@@ -10,6 +10,9 @@
 use comrak::nodes::AstNode;
 use comrak::{parse_document, Arena, Options};
 
+/// Public because, unlike the render plugins, this one's work happens in the
+/// router: `http` calls its builders once `Set::has("x-headers")` says so.
+pub mod headers;
 mod math;
 mod mermaid;
 mod webmcp;
@@ -47,12 +50,13 @@ pub trait Plugin: Sync {
     }
 }
 
+static HEADERS: headers::XHeaders = headers::XHeaders;
 static MATH: math::Math = math::Math;
 static MERMAID: mermaid::Mermaid = mermaid::Mermaid;
 static WEBMCP: webmcp::WebMcp = webmcp::WebMcp;
 
 /// Every plugin compiled into this binary.
-pub static REGISTRY: &[&dyn Plugin] = &[&MATH, &MERMAID, &WEBMCP];
+pub static REGISTRY: &[&dyn Plugin] = &[&HEADERS, &MATH, &MERMAID, &WEBMCP];
 
 /// `name — description` for each registered plugin, for `--help`.
 pub fn catalog() -> Vec<String> {

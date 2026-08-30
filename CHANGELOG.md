@@ -4,7 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0] — unreleased
+## [0.6.0] — unreleased
+
+### Added
+
+- **`x-headers` plugin** (`--x-headers`, or `--plugin x-headers`) — response
+  headers that introduce the server and describe the document: `Server`,
+  `Last-Modified`, a representation-aware weak `ETag`, `Vary`, `Link`, and
+  `Doc-Format` / `Doc-Title` / `Doc-Words` / `Doc-Headings`. Brings with it
+  `If-None-Match` and `If-Modified-Since` handling, where a `304` skips the
+  file read and the render. The names carry no `X-` prefix, per RFC 6648.
+
+### Fixed
+
+- A filename holding literal percent escapes — a WordPress export saved as
+  `%d8%a2.md` — was unreachable: every link written to it decoded to a name
+  that was not on disk. Such a request now redirects to the double-encoded
+  canonical URL rather than 404ing.
+- Rendered pages carry no chrome. The banner, the footer with its version and
+  `serving <path>` line, the "All files" breadcrumb above every document and
+  the "Back to all files" link on the 404 are all gone: the page is the
+  document. The listing no longer names the served directory either, which on
+  a public deploy had been printing the host's filesystem layout to every
+  visitor.
+
+## [0.5.0] — 2026-08-29
 
 The agent release. A folder of Markdown becomes something an AI agent can
 search and read, not just a website.
@@ -37,12 +61,6 @@ search and read, not just a website.
 
 ### Changed
 
-- Rendered pages carry no chrome. The banner, the footer with its version and
-  `serving <path>` line, the "All files" breadcrumb above every document and
-  the "Back to all files" link on the 404 are all gone: the page is the
-  document. The listing no longer names the served directory either, which on
-  a public deploy had been printing the host's filesystem layout to every
-  visitor.
 - The file list moved from a startup-only `Vec` into a shared catalog.
 - `POST` and `OPTIONS` are accepted, on the MCP endpoint only. Every other path
   still answers `405 Method Not Allowed` with `Allow: GET, HEAD`.

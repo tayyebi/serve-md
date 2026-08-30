@@ -1,6 +1,6 @@
 [package]
 name = "serve-md"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "A minimal web server that renders Markdown and HTML — and speaks MCP, so AI agents can search it."
 license = "MIT"

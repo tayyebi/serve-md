@@ -6,7 +6,7 @@
 class ServeMd < Formula
   desc "Minimal Markdown/HTML server that also speaks MCP for AI agents"
   homepage "https://github.com/tayyebi/serve-md"
-  version "0.5.0"
+  version "0.6.0"
   license "MIT"
 
   # ripgrep is not strictly required — serve-md falls back to ag, then grep,
@@ -18,11 +18,11 @@ class ServeMd < Formula
   # on install.
   on_linux do
     on_intel do
-      url "https://github.com/tayyebi/serve-md/releases/download/v0.5.0/serve-md-linux-x86_64"
+      url "https://github.com/tayyebi/serve-md/releases/download/v0.6.0/serve-md-linux-x86_64"
       sha256 "REPLACE_WITH_SHA256"
     end
     on_arm do
-      url "https://github.com/tayyebi/serve-md/releases/download/v0.5.0/serve-md-linux-aarch64"
+      url "https://github.com/tayyebi/serve-md/releases/download/v0.6.0/serve-md-linux-aarch64"
       sha256 "REPLACE_WITH_SHA256"
     end
   end
@@ -30,7 +30,7 @@ class ServeMd < Formula
   # No macOS binaries are published yet, so mac users build from source.
   on_macos do
     depends_on "rust" => :build
-    url "https://github.com/tayyebi/serve-md/archive/refs/tags/v0.5.0.tar.gz"
+    url "https://github.com/tayyebi/serve-md/archive/refs/tags/v0.6.0.tar.gz"
     sha256 "REPLACE_WITH_SHA256"
   end
 

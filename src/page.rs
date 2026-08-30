@@ -89,6 +89,74 @@ pub fn format_time(t: SystemTime) -> String {
     format!("{y:04}-{m:02}-{d:02} {hour:02}:{minute:02} UTC")
 }
 
+/// The `Last-Modified` / `If-Modified-Since` format: IMF-fixdate, RFC 9110
+/// §5.6.7. Deliberately not [`format_time`] — that one is for humans reading
+/// the listing, and its `YYYY-MM-DD HH:MM UTC` is not a date any HTTP client
+/// will parse.
+///
+/// Fixed English day and month abbreviations, and `GMT` spelled literally, are
+/// what the grammar requires; a locale-aware formatter would be a bug here.
+pub fn format_http_date(t: SystemTime) -> String {
+    let secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    // 1970-01-01 was a Thursday, index 4 in a week starting at Sunday.
+    let wd = WEEKDAYS[(days + 4).rem_euclid(7) as usize];
+    let mo = MONTHS[(m - 1) as usize];
+    let (h, mi, se) = (rem / 3600, rem / 60 % 60, rem % 60);
+    format!("{wd}, {d:02} {mo} {y:04} {h:02}:{mi:02}:{se:02} GMT")
+}
+
+/// Parses an IMF-fixdate back to seconds since the epoch.
+///
+/// Only that one format, though RFC 9110 §5.6.7 also lists two obsolete ones.
+/// The single caller is conditional-request handling, where an unparsed date
+/// means the full response is served — correct, merely wasteful — so the cost
+/// of not accepting a form no client has sent since the 1990s is nothing.
+pub fn parse_http_date(s: &str) -> Option<u64> {
+    // Sun, 06 Nov 1994 08:49:37 GMT
+    let s = s.trim();
+    let rest = s.split_once(", ")?.1;
+    let mut parts = rest.split(' ');
+    let d: u32 = parts.next()?.parse().ok()?;
+    let mon = parts.next()?;
+    let y: i64 = parts.next()?.parse().ok()?;
+    let time = parts.next()?;
+    if parts.next()? != "GMT" || parts.next().is_some() {
+        return None;
+    }
+    let m = MONTHS.iter().position(|x| *x == mon)? as u32 + 1;
+    if d == 0 || d > 31 {
+        return None;
+    }
+    let mut hms = time.split(':');
+    let h: i64 = hms.next()?.parse().ok()?;
+    let mi: i64 = hms.next()?.parse().ok()?;
+    let se: i64 = hms.next()?.parse().ok()?;
+    if hms.next().is_some() || h > 23 || mi > 59 || se > 60 {
+        return None;
+    }
+    let secs = days_from_civil(y, m, d) * 86_400 + h * 3600 + mi * 60 + se;
+    u64::try_from(secs).ok()
+}
+
+const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// The inverse of [`civil_from_days`], same algorithm read backwards.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -155,6 +223,52 @@ mod tests {
         assert_eq!(format_size(500), "500 B");
         assert_eq!(format_size(2048), "2.0 KiB");
         assert_eq!(format_size(5 * 1024 * 1024), "5.0 MiB");
+    }
+
+    #[test]
+    fn http_date_formatting() {
+        let at = |s| UNIX_EPOCH + std::time::Duration::from_secs(s);
+        assert_eq!(
+            format_http_date(SystemTime::UNIX_EPOCH),
+            "Thu, 01 Jan 1970 00:00:00 GMT"
+        );
+        // The example date from RFC 9110 §5.6.7 itself.
+        assert_eq!(format_http_date(at(784_111_777)), "Sun, 06 Nov 1994 08:49:37 GMT");
+        // A leap day, which is where a hand-written calendar goes wrong.
+        assert_eq!(format_http_date(at(1_709_164_800)), "Thu, 29 Feb 2024 00:00:00 GMT");
+    }
+
+    #[test]
+    fn http_date_round_trips() {
+        for secs in [0u64, 784_111_777, 1_709_164_800, 1_700_000_000, 4_102_444_800] {
+            let t = UNIX_EPOCH + std::time::Duration::from_secs(secs);
+            assert_eq!(parse_http_date(&format_http_date(t)), Some(secs));
+        }
+    }
+
+    #[test]
+    fn a_date_that_cannot_be_parsed_is_none() {
+        // Every one of these makes the caller serve the full response, which
+        // is the safe direction.
+        assert_eq!(parse_http_date(""), None);
+        assert_eq!(parse_http_date("not a date"), None);
+        assert_eq!(parse_http_date("Sun, 06 Nov 1994 08:49:37"), None);
+        assert_eq!(parse_http_date("Sun, 06 Nov 1994 08:49:37 UTC"), None);
+        assert_eq!(parse_http_date("Sun, 06 Xxx 1994 08:49:37 GMT"), None);
+        assert_eq!(parse_http_date("Sun, 06 Nov 1994 25:49:37 GMT"), None);
+        assert_eq!(parse_http_date("Sun, 40 Nov 1994 08:49:37 GMT"), None);
+        // Before the epoch: no u64 to return.
+        assert_eq!(parse_http_date("Mon, 01 Jan 1900 00:00:00 GMT"), None);
+    }
+
+    #[test]
+    fn the_weekday_is_not_taken_on_trust() {
+        // A client may send any weekday it likes; parsing ignores it, so a
+        // wrong one must not shift the instant.
+        assert_eq!(
+            parse_http_date("Mon, 06 Nov 1994 08:49:37 GMT"),
+            parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT")
+        );
     }
 
     #[test]

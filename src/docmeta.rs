@@ -56,15 +56,72 @@ pub fn headings(src: &str, options: &Options<'_>) -> Vec<Heading> {
     out
 }
 
+/// What a document says about itself in one pass: title, prose word count, and
+/// how many headings it has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Brief {
+    /// The first level-1 heading, or failing that the first heading of any
+    /// level. `None` for a document with no headings at all.
+    pub title: Option<String>,
+    /// Words of prose. Fenced code is excluded — a document is not longer to
+    /// read because it quotes a config file.
+    pub words: usize,
+    pub headings: usize,
+}
+
+/// Everything in [`Brief`], from a single parse.
+///
+/// One pass rather than three because the `x-headers` plugin wants all of it on
+/// every document request, and the response is already paying for the render's
+/// own parse. Unlike [`headings`] this allocates no [`Anchorizer`]: nothing
+/// here hands out `#anchor` links.
+pub fn brief(src: &str, options: &Options<'_>) -> Brief {
+    let arena = Arena::new();
+    let root = parse_document(&arena, src, options);
+    let mut first_h1: Option<String> = None;
+    let mut first_any: Option<String> = None;
+    let mut count = 0usize;
+    let mut words = 0usize;
+    for node in root.descendants() {
+        // `Text` and `Code` beneath a heading are visited here too, so heading
+        // words count once, as words — which is what a reader would say.
+        let level = {
+            let data = node.data.borrow();
+            match &data.value {
+                NodeValue::Heading(h) => Some(h.level),
+                NodeValue::Text(t) => {
+                    words += t.split_whitespace().count();
+                    None
+                }
+                NodeValue::Code(c) => {
+                    words += c.literal.split_whitespace().count();
+                    None
+                }
+                _ => None,
+            }
+        };
+        let Some(level) = level else { continue };
+        count += 1;
+        let text = inline_text(node);
+        if level == 1 && first_h1.is_none() {
+            first_h1 = Some(text.clone());
+        }
+        if first_any.is_none() {
+            first_any = Some(text);
+        }
+    }
+    Brief {
+        title: first_h1.or(first_any),
+        words,
+        headings: count,
+    }
+}
+
 /// The document's title: its first level-1 heading, or failing that its first
 /// heading of any level. `None` for a document with no headings at all, which
 /// leaves the caller to fall back to the filename.
 pub fn title(src: &str, options: &Options<'_>) -> Option<String> {
-    let all = headings(src, options);
-    all.iter()
-        .find(|h| h.level == 1)
-        .or_else(|| all.first())
-        .map(|h| h.text.clone())
+    brief(src, options).title
 }
 
 /// A one-line summary: the first sentence of the first paragraph.
@@ -146,6 +203,33 @@ mod tests {
 
     fn opts() -> Options<'static> {
         Set::default().options()
+    }
+
+    #[test]
+    fn brief_reports_title_words_and_heading_count() {
+        let src = "# One\n\nsome plain words here\n\n## Two\n\nmore\n";
+        let b = brief(src, &opts());
+        assert_eq!(b.title.as_deref(), Some("One"));
+        assert_eq!(b.headings, 2);
+        // "One" + "some plain words here" + "Two" + "more"
+        assert_eq!(b.words, 7);
+    }
+
+    #[test]
+    fn brief_does_not_count_fenced_code_as_prose() {
+        let plain = brief("two words\n", &opts()).words;
+        let with_code = brief("two words\n\n```\nlet x = 1 + 2 + 3;\n```\n", &opts()).words;
+        assert_eq!(plain, with_code);
+        // Inline code is prose, though: it reads as part of the sentence.
+        assert_eq!(brief("a `b` c\n", &opts()).words, 3);
+    }
+
+    #[test]
+    fn brief_falls_back_past_a_missing_h1() {
+        assert_eq!(brief("## Only\n", &opts()).title.as_deref(), Some("Only"));
+        let b = brief("no headings at all\n", &opts());
+        assert_eq!(b.title, None);
+        assert_eq!(b.headings, 0);
     }
 
     #[test]

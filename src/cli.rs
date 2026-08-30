@@ -56,6 +56,7 @@ OPTIONS:
                            (without it the file list is read once, at startup)
         --fresh-interval <MS>
                            How often --fresh re-scans      [default: {interval}]
+        --x-headers        Shorthand for --plugin x-headers
         --plugin <NAME>    Enable a plugin (repeatable or comma-separated;
                            none are enabled by default)
     -h, --help             Print help
@@ -113,6 +114,12 @@ pub fn parse(args: &[String]) -> Result<ParseOutcome, String> {
             }
             "--fresh" => {
                 fresh = true;
+                i += 1;
+            }
+            // Shorthand for `--plugin x-headers`. The plugin is the real
+            // thing; this is the spelling the feature is asked for by.
+            "--x-headers" => {
+                push_plugins(&mut plugin_names, "x-headers");
                 i += 1;
             }
             "--fresh-interval" => {
@@ -261,6 +268,24 @@ mod tests {
             c.fresh_interval,
             Duration::from_millis(DEFAULT_FRESH_INTERVAL_MS)
         );
+    }
+
+    #[test]
+    fn x_headers_is_shorthand_for_the_plugin() {
+        assert!(run(&["--x-headers"]).plugins.has("x-headers"));
+        assert!(run(&["--plugin", "x-headers"]).plugins.has("x-headers"));
+        // Both spellings at once must not register it twice.
+        let c = run(&["--x-headers", "--plugin", "x-headers"]);
+        assert_eq!(c.plugins.names(), vec!["x-headers"]);
+        // And it stays off unless asked for.
+        assert!(!run(&[]).plugins.has("x-headers"));
+    }
+
+    #[test]
+    fn help_mentions_the_x_headers_shorthand() {
+        let h = help();
+        assert!(h.contains("--x-headers"));
+        assert!(h.contains("x-headers — "), "the plugin catalog lists it");
     }
 
     #[test]

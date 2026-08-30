@@ -11,7 +11,7 @@ Point it at a folder. You get a website, a Model Context Protocol server, and a 
 ```
 $ serve-md --plugin webmcp --dir ./docs
 
-serve-md 0.5.0
+serve-md 0.6.0
 serving: ./docs
 plugins: webmcp
   http://127.0.0.1:8080/
@@ -89,6 +89,7 @@ comma-separated).
 | `math` | `$…$` and `$$…$$` become MathML, rendered by the browser natively — no KaTeX, no web fonts, no JavaScript |
 | `mermaid` | ` ```mermaid ` flowcharts become SVG, laid out server-side with a Sugiyama algorithm — no Mermaid.js |
 | `webmcp` | the agent surface: `/mcp`, `/llms.txt`, and in-browser WebMCP |
+| `x-headers` | response headers that introduce the server and describe each document (also `--x-headers`) |
 
 Both `math` and `mermaid` render **server-side**, so pages stay script-free and
 work with JavaScript disabled.
@@ -97,8 +98,10 @@ work with JavaScript disabled.
 
 ## For agents
 
-Everything in this section requires `--plugin webmcp`. Without it, serve-md is
-exactly the file server described above and none of these routes exist.
+The routes in this section require `--plugin webmcp`. Without it, serve-md is
+exactly the file server described above and none of them exist. The one
+exception is [Response headers](#response-headers), which is its own plugin and
+needs nothing else.
 
 ### The MCP endpoint
 
@@ -183,6 +186,49 @@ from the server's.
 This is the only JavaScript serve-md ever emits, and only under
 `--plugin webmcp`.
 
+### Response headers
+
+`--x-headers` (or `--plugin x-headers`) turns on a set of headers that let a
+client learn what a document is without fetching it, and revalidate it once it
+has:
+
+```console
+$ curl -sI http://localhost:8080/guides/start.md
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Server: serve-md/0.6.0
+Last-Modified: Sat, 30 Aug 2026 11:04:22 GMT
+ETag: W/"1756551862-4821-html"
+Vary: Accept, User-Agent
+Link: </guides/start.md>; rel="canonical", </llms.txt>; rel="alternate"; type="text/plain", </mcp>; rel="service-desc"; type="application/json"
+Doc-Format: markdown
+Doc-Title: Getting Started
+Doc-Words: 812
+Doc-Headings: 14
+```
+
+The `Link` entries for `/llms.txt` and `/mcp` appear only when `webmcp` is
+enabled too — the plugin will not advertise a route this server is not serving.
+
+`If-None-Match` and `If-Modified-Since` are honoured, and a `304` skips both the
+file read and the render. The `ETag` names the representation, because one URL
+serves three of them: the Markdown source, the terminal text, and the rendered
+page. `Vary` says the same thing to caches, which is worth having on its own —
+without it a cache in front of serve-md can answer a browser with the reply it
+stored for `curl`.
+
+The names carry no `X-` prefix. [RFC 6648][rfc6648] deprecated the convention
+in 2012, on the grounds that a prefixed header that proves useful gets adopted
+anyway and then both spellings have to live forever.
+
+**One caveat before you enable this on a public deploy:** `Server` names the
+version you are running, which is a fingerprinting aid. Everything else is
+already visible — the listing prints each file's size and modification time,
+and the title and counts are in the body being served — but the version is not.
+That is why this is opt-in.
+
+[rfc6648]: https://www.rfc-editor.org/rfc/rfc6648
+
 ### llms.txt
 
 `GET /llms.txt` returns an [llms.txt v2][llmstxt] index generated from the
@@ -203,6 +249,7 @@ fills the gap when there is no file.
 | `--port <PORT>` | `8080` | |
 | `--dir <DIR>` | `.` | Directory to serve |
 | `--plugin <NAME>` | none | Repeatable or comma-separated |
+| `--x-headers` | off | Shorthand for `--plugin x-headers` |
 | `--fresh` | off | Watch for changes instead of scanning once at startup |
 | `--fresh-interval <MS>` | `1000` | How often `--fresh` re-scans |
 | `--user <USER>` | none | Require Basic auth |
