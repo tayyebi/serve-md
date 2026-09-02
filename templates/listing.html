@@ -6,19 +6,63 @@
 <table>
 <thead>
 <tr>
-<th scope="col">Name</th>
-<th scope="col">Size</th>
-<th scope="col">Modified</th>
+<th scope="col" data-sort="name">Name <span class="sort-arrow"></span></th>
+<th scope="col" data-sort="size">Size <span class="sort-arrow"></span></th>
+<th scope="col" data-sort="mtime">Modified <span class="sort-arrow"></span></th>
 </tr>
 </thead>
 <tbody>
 {{#for file}}
 <tr>
-<td><a href="/{{link}}">{{name}}</a></td>
-<td>{{size}}</td>
-<td>{{mtime}}</td>
+<td data-col="name" data-value="{{sort_name}}"><a href="/{{link}}">{{name}}</a></td>
+<td data-col="size" data-value="{{sort_size}}">{{size}}</td>
+<td data-col="mtime" data-value="{{sort_mtime}}">{{mtime}}</td>
 </tr>
 {{/for}}
 </tbody>
 </table>
+<script>
+(function(){
+  var table = document.querySelector('table');
+  if (!table) return;
+  var tbody = table.querySelector('tbody');
+  var headers = table.querySelectorAll('th[data-sort]');
+  var active = 'mtime', asc = false;
+  function updateArrows() {
+    for (var i = 0; i < headers.length; i++) {
+      var h = headers[i];
+      var arrow = h.querySelector('.sort-arrow');
+      if (h.dataset.sort === active) {
+        arrow.textContent = asc ? ' \u2191' : ' \u2193';
+      } else {
+        arrow.textContent = '';
+      }
+    }
+  }
+  function sort(col) {
+    if (col === active) { asc = !asc; } else { active = col; asc = (col === 'name'); }
+    var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+    rows.sort(function(a, b) {
+      var ae = a.querySelector('[data-col="' + col + '"]');
+      var be = b.querySelector('[data-col="' + col + '"]');
+      var av = ae ? ae.dataset.value : '';
+      var bv = be ? be.dataset.value : '';
+      var cmp;
+      if (col === 'name') { cmp = av.localeCompare(bv); }
+      else { cmp = Number(av) - Number(bv); }
+      return asc ? cmp : -cmp;
+    });
+    for (var i = 0; i < rows.length; i++) tbody.appendChild(rows[i]);
+    updateArrows();
+  }
+  for (var i = 0; i < headers.length; i++) {
+    (function(h) {
+      h.style.cursor = 'pointer';
+      h.setAttribute('title', 'Click to sort');
+      h.addEventListener('click', function() { sort(h.dataset.sort); });
+    })(headers[i]);
+  }
+  updateArrows();
+})();
+</script>
 {{/if}}

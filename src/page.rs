@@ -184,13 +184,24 @@ fn body_html(files: &[FileEntry]) -> String {
     } else {
         vec!["nonempty"]
     };
-    let mut rows: Vec<Vec<(String, String)>> = Vec::with_capacity(files.len());
-    for f in files {
+    let mut sorted = files.to_vec();
+    sorted.sort_by(|a, b| b.modified.cmp(&a.modified).then(a.rel.cmp(&b.rel)));
+    let mut rows: Vec<Vec<(String, String)>> = Vec::with_capacity(sorted.len());
+    for f in &sorted {
+        let mtime_secs = f
+            .modified
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
         rows.push(vec![
             ("link".to_string(), percent_encode_path(&f.rel)),
             ("name".to_string(), f.rel.clone()),
             ("size".to_string(), format_size(f.size)),
             ("mtime".to_string(), format_time(f.modified)),
+            ("sort_name".to_string(), f.rel.clone()),
+            ("sort_size".to_string(), f.size.to_string()),
+            ("sort_mtime".to_string(), mtime_secs),
         ]);
     }
     tpl.render(&vars, &rows, &flags)
@@ -339,6 +350,31 @@ mod tests {
         let out = listing_html(&files, "");
         assert!(out.contains("a&lt;b&gt;.md"));
         assert!(!out.contains("a<b>.md"));
+        // Sort keys ride along for the client-side table sort.
+        assert!(out.contains(r#"data-col="size" data-value="1""#));
+        assert!(out.contains(r#"data-col="mtime" data-value="0""#));
+    }
+
+    #[test]
+    fn listing_html_sorts_by_modified_descending_by_default() {
+        let old = SystemTime::UNIX_EPOCH;
+        let new = old + std::time::Duration::from_secs(1000);
+        let files = vec![
+            FileEntry {
+                rel: "old.md".into(),
+                size: 10,
+                modified: old,
+            },
+            FileEntry {
+                rel: "newer.md".into(),
+                size: 20,
+                modified: new,
+            },
+        ];
+        let out = listing_html(&files, "");
+        let old_pos = out.find("old.md").unwrap();
+        let new_pos = out.find("newer.md").unwrap();
+        assert!(new_pos < old_pos, "newest file should come first");
     }
 
     #[test]
