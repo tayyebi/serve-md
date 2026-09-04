@@ -88,6 +88,7 @@ comma-separated).
 |---|---|
 | `math` | `$…$` and `$$…$$` become MathML, rendered by the browser natively — no KaTeX, no web fonts, no JavaScript |
 | `mermaid` | ` ```mermaid ` flowcharts become SVG, laid out server-side with a Sugiyama algorithm — no Mermaid.js |
+| `sitemap` | a generated `/sitemap.xml` listing every document, for search engines (also `--sitemap`) |
 | `webmcp` | the agent surface: `/mcp`, `/llms.txt`, and in-browser WebMCP |
 | `x-headers` | response headers that introduce the server and describe each document (also `--x-headers`) |
 
@@ -99,9 +100,9 @@ work with JavaScript disabled.
 ## For agents
 
 The routes in this section require `--plugin webmcp`. Without it, serve-md is
-exactly the file server described above and none of them exist. The one
-exception is [Response headers](#response-headers), which is its own plugin and
-needs nothing else.
+exactly the file server described above and none of them exist. The
+exceptions are [Response headers](#response-headers) and
+[sitemap.xml](#sitemapxml), each its own plugin and needing nothing else.
 
 ### The MCP endpoint
 
@@ -239,6 +240,23 @@ concatenated.
 **If you have written your own `llms.txt`, yours is served.** Generation only
 fills the gap when there is no file.
 
+### sitemap.xml
+
+`--sitemap` (or `--plugin sitemap`) turns on `GET /sitemap.xml`, a
+[Sitemaps protocol][sitemaps] index of every document, generated from the tree
+so it can never drift from what is actually served. Each entry's `<lastmod>`
+comes from the file's own modification time.
+
+A `<loc>` must be an absolute URL, and this server has no configured public
+hostname, so it is built from the request's own `Host` header — and
+`X-Forwarded-Proto`, for the common case of a TLS-terminating proxy in front
+of a plain-HTTP serve-md.
+
+**If you have written your own `sitemap.xml`, yours is served.** Generation
+only fills the gap when there is no file.
+
+[sitemaps]: https://www.sitemaps.org/protocol.html
+
 ---
 
 ## Options
@@ -250,6 +268,7 @@ fills the gap when there is no file.
 | `--dir <DIR>` | `.` | Directory to serve |
 | `--plugin <NAME>` | none | Repeatable or comma-separated |
 | `--x-headers` | off | Shorthand for `--plugin x-headers` |
+| `--sitemap` | off | Shorthand for `--plugin sitemap` |
 | `--fresh` | off | Watch for changes instead of scanning once at startup |
 | `--fresh-interval <MS>` | `1000` | How often `--fresh` re-scans |
 | `--user <USER>` | none | Require Basic auth |

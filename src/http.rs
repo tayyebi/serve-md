@@ -13,6 +13,7 @@ use crate::plugin::headers::{self, Repr};
 use crate::render;
 use crate::scanner::{is_forbidden_segment, FileEntry, FileKind};
 use crate::search;
+use crate::sitemap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -47,6 +48,9 @@ const MCP_PATH: &str = "/mcp";
 /// Generated when the served tree does not contain a file of the same name.
 const LLMS_PATH: &str = "/llms.txt";
 const LLMS_FULL_PATH: &str = "/llms-full.txt";
+/// Generated when `--plugin sitemap` is on and the served tree holds no file
+/// of the same name.
+const SITEMAP_PATH: &str = "/sitemap.xml";
 /// The server card, so a client can discover the endpoint without guessing.
 /// `.well-known` is already the one hidden directory the router will serve.
 const MCP_CARD_PATH: &str = "/.well-known/mcp.json";
@@ -95,6 +99,9 @@ struct Ctx {
     /// every header below the four this server always sends, and with them
     /// conditional-request handling.
     xheaders: bool,
+    /// Whether `--sitemap` (or `--plugin sitemap`) was given, which gates
+    /// `/sitemap.xml`.
+    sitemap: bool,
     /// The search tool found at startup, if any.
     engine: Option<search::Engine>,
     /// Connections currently being served, against `MAX_LIVE_CONNECTIONS`.
@@ -139,6 +146,7 @@ fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
     };
     let mcp = cfg.plugins.has("webmcp");
     let xheaders = cfg.plugins.has("x-headers");
+    let sitemap = cfg.plugins.has("sitemap");
     // Probed once here rather than per query, so a missing search tool is
     // reported in the banner instead of at the first `search_docs` call.
     let engine = if mcp { search::detect() } else { None };
@@ -150,6 +158,7 @@ fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
         plugins: cfg.plugins,
         mcp,
         xheaders,
+        sitemap,
         engine,
         live: AtomicUsize::new(0),
     });
@@ -183,6 +192,9 @@ fn serve_on(cfg: Config, listener: TcpListener) -> io::Result<()> {
             // would otherwise only surface inside a tool call an agent made.
             None => println!("search: DISABLED — no rg, ag or grep on PATH"),
         }
+    }
+    if ctx.sitemap {
+        println!("  {url}sitemap.xml  for search engines");
     }
     if !cfg.no_open {
         open_browser(&url);
@@ -382,8 +394,8 @@ fn route(
     // is total: it has no seam for a path that names no file on disk. Every
     // one of these yields to a real file of the same name, so an author who
     // writes their own `llms.txt` is served theirs.
-    if ctx.mcp {
-        if let Some(result) = synthetic(ctx, stream, &decoded, is_head) {
+    if ctx.mcp || ctx.sitemap {
+        if let Some(result) = synthetic(ctx, stream, req, &decoded, is_head) {
             return result;
         }
     }
@@ -881,6 +893,7 @@ fn redirect(
 fn synthetic(
     ctx: &Ctx,
     stream: &mut TcpStream,
+    req: &Request,
     path: &str,
     is_head: bool,
 ) -> Option<io::Result<()>> {
@@ -895,11 +908,16 @@ fn synthetic(
     // The body is built first and written once at the end, rather than through
     // a closure per arm: a closure capturing `stream` would hold a mutable
     // borrow across the whole match, which the `MCP_PATH` arm also needs.
+    //
+    // Every arm is guarded by the plugin that owns it: this function is
+    // entered whenever *either* `--plugin webmcp` or `--plugin sitemap` is
+    // on, and without the guard the other plugin's routes would answer too,
+    // one server exposing a route nobody asked to enable.
     let (body, ctype) = match path {
         // 2026-07-28 §"Backward Compatibility": a server implementing only
         // this revision answers GET or DELETE on the MCP endpoint with 405,
         // since the GET stream and the DELETE session teardown are gone.
-        MCP_PATH => {
+        MCP_PATH if ctx.mcp => {
             let base = ctx.base();
             return Some(method_not_allowed(
                 stream,
@@ -908,18 +926,37 @@ fn synthetic(
                 is_head,
             ));
         }
-        LLMS_PATH => (
+        LLMS_PATH if ctx.mcp => (
             llms::llms_txt(&ctx.dir, &snap, &ctx.plugins.options(), ctx.mcp),
             "text/plain; charset=utf-8",
         ),
-        LLMS_FULL_PATH => (
+        LLMS_FULL_PATH if ctx.mcp => (
             llms::llms_full_txt(&ctx.dir, &snap, &ctx.plugins.options()),
             "text/plain; charset=utf-8",
         ),
-        MCP_CARD_PATH => (server_card(), "application/json"),
+        MCP_CARD_PATH if ctx.mcp => (server_card(), "application/json"),
+        SITEMAP_PATH if ctx.sitemap => (
+            sitemap::sitemap_xml(&snap, &base_url(req)),
+            "application/xml; charset=utf-8",
+        ),
         _ => return None,
     };
     Some(respond(stream, 200, "OK", ctype, body.as_bytes(), &[], is_head))
+}
+
+/// The scheme and host to use for the absolute URLs `/sitemap.xml` requires.
+///
+/// This server has no configured public hostname, so this is built from what
+/// the client actually reached it through: the `Host` header a browser always
+/// sends, and `X-Forwarded-Proto` for the common case of a TLS-terminating
+/// proxy in front of a plain-HTTP serve-md. Anything else defaults to `http`,
+/// which is what this server itself speaks.
+fn base_url(req: &Request) -> String {
+    let https = header(&req.headers, "x-forwarded-proto")
+        .map(|v| v.eq_ignore_ascii_case("https"))
+        .unwrap_or(false);
+    let host = header(&req.headers, "host").unwrap_or("localhost");
+    format!("{}://{host}", if https { "https" } else { "http" })
 }
 
 /// The MCP server card: what this endpoint is, before a client connects to it.
@@ -2125,10 +2162,13 @@ mod tests {
         assert!(body.contains("display=\"block\""), "{body}");
         // Fully server-rendered: no client-side typesetting is shipped.
         assert!(!body.contains("<script"), "{body}");
-        // The plugin's style block rides along only on pages it touched.
-        assert!(body.contains("<style"), "{body}");
+        // The plugin's style block rides along only on pages it touched. The
+        // base page always carries its own <style> for unsized images, so the
+        // math-specific rule is what distinguishes a page it actually fired
+        // on.
+        assert!(body.contains("font-size:1.1em"), "{body}");
         let (_, plain, _) = http_get(addr, "/plain.md", "test-agent", None);
-        assert!(!plain.contains("<style"), "{plain}");
+        assert!(!plain.contains("font-size:1.1em"), "{plain}");
     }
 
     #[test]
@@ -2137,7 +2177,7 @@ mod tests {
         let (status, body, _) = http_get(addr, "/math.md", "test-agent", None);
         assert_eq!(status, 200);
         assert!(!body.contains("<math"), "{body}");
-        assert!(!body.contains("<style"), "{body}");
+        assert!(!body.contains("font-size:1.1em"), "{body}");
     }
 
     #[test]
@@ -2196,8 +2236,9 @@ mod tests {
         assert_eq!(status, 200);
         assert!(body.contains("<math"), "{body}");
         assert!(body.contains("<svg"), "{body}");
-        // Each plugin contributes its own <head> block.
-        assert_eq!(body.matches("<style>").count(), 2, "{body}");
+        // Each plugin contributes its own <head> block, plus the base
+        // page's own <style> for unsized images.
+        assert_eq!(body.matches("<style>").count(), 3, "{body}");
     }
 
     // ------------------------------------------------------- the agent surface
@@ -2340,6 +2381,61 @@ mod tests {
         let body = body_of(&resp);
         assert!(body.contains("Hello **world**."), "{body}");
         assert!(body.contains("Source: `/docs/b.md`"), "{body}");
+    }
+
+    // --------------------------------------------------------------- sitemap
+
+    #[test]
+    fn sitemap_does_not_exist_without_the_plugin() {
+        let addr = start_server(setup(), None, None);
+        let (status, _, _) = http_get(addr, "/sitemap.xml", "test-agent", None);
+        assert_eq!(status, 404, "/sitemap.xml must not exist without --plugin sitemap");
+    }
+
+    #[test]
+    fn sitemap_xml_is_generated_from_the_tree() {
+        let addr = start_server_with(setup(), None, None, &["sitemap"]);
+        let (status, resp, ct) = http_get(addr, "/sitemap.xml", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(ct.to_ascii_lowercase().contains("application/xml"), "{ct}");
+        let body = body_of(&resp);
+        assert!(body.contains("<loc>http://localhost/a.md</loc>"), "{body}");
+        assert!(body.contains("<loc>http://localhost/docs/b.md</loc>"), "{body}");
+        // A static asset earns no entry.
+        assert!(!body.contains("ignore.txt"), "{body}");
+    }
+
+    #[test]
+    fn sitemap_scheme_follows_x_forwarded_proto() {
+        let addr = start_server_with(setup(), None, None, &["sitemap"]);
+        let mut s = TcpStream::connect(addr).unwrap();
+        s.write_all(
+            b"GET /sitemap.xml HTTP/1.1\r\nHost: example.com\r\nX-Forwarded-Proto: https\r\n\r\n",
+        )
+        .unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut resp = String::new();
+        let _ = s.read_to_string(&mut resp);
+        assert!(resp.contains("<loc>https://example.com/a.md</loc>"), "{resp}");
+    }
+
+    #[test]
+    fn a_local_sitemap_xml_wins_over_the_generated_one() {
+        let dir = tmp_dir("sitemaplocal");
+        fs::write(dir.join("sitemap.xml"), "<urlset><!-- mine --></urlset>").unwrap();
+        let addr = start_server_with(dir, None, None, &["sitemap"]);
+        let (status, resp, _) = http_get(addr, "/sitemap.xml", "test-agent", None);
+        assert_eq!(status, 200);
+        assert_eq!(body_of(&resp), "<urlset><!-- mine --></urlset>");
+    }
+
+    #[test]
+    fn the_mcp_routes_stay_off_when_only_sitemap_is_enabled() {
+        let addr = start_server_with(setup(), None, None, &["sitemap"]);
+        let (status, _, _) = http_get(addr, "/llms.txt", "test-agent", None);
+        assert_eq!(status, 404);
+        let (status, resp) = http_post(addr, "/mcp", &[], None, r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
+        assert_eq!(status, 405, "{resp}");
     }
 
     #[test]

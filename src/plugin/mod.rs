@@ -15,6 +15,7 @@ use comrak::{parse_document, Arena, Options};
 pub mod headers;
 mod math;
 mod mermaid;
+mod sitemap;
 mod webmcp;
 
 /// A render extension. Hooks the pipeline at three points: parser setup, an AST
@@ -53,10 +54,11 @@ pub trait Plugin: Sync {
 static HEADERS: headers::XHeaders = headers::XHeaders;
 static MATH: math::Math = math::Math;
 static MERMAID: mermaid::Mermaid = mermaid::Mermaid;
+static SITEMAP: sitemap::Sitemap = sitemap::Sitemap;
 static WEBMCP: webmcp::WebMcp = webmcp::WebMcp;
 
 /// Every plugin compiled into this binary.
-pub static REGISTRY: &[&dyn Plugin] = &[&HEADERS, &MATH, &MERMAID, &WEBMCP];
+pub static REGISTRY: &[&dyn Plugin] = &[&HEADERS, &MATH, &MERMAID, &SITEMAP, &WEBMCP];
 
 /// `name — description` for each registered plugin, for `--help`.
 pub fn catalog() -> Vec<String> {

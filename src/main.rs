@@ -15,6 +15,7 @@ mod plugin;
 mod render;
 mod scanner;
 mod search;
+mod sitemap;
 mod template;
 
 use cli::ParseOutcome;

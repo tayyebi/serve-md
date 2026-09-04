@@ -57,6 +57,7 @@ OPTIONS:
         --fresh-interval <MS>
                            How often --fresh re-scans      [default: {interval}]
         --x-headers        Shorthand for --plugin x-headers
+        --sitemap          Shorthand for --plugin sitemap
         --plugin <NAME>    Enable a plugin (repeatable or comma-separated;
                            none are enabled by default)
     -h, --help             Print help
@@ -71,6 +72,7 @@ EXAMPLES:
     serve-md --plugin math --dir ./docs
     serve-md --plugins math,mermaid --dir ./docs
     serve-md --plugin webmcp --fresh --dir ./docs
+    serve-md --sitemap --dir ./docs
     serve-md --user admin --pass secret
     curl -u admin:secret http://127.0.0.1:8080/README.md
 
@@ -120,6 +122,11 @@ pub fn parse(args: &[String]) -> Result<ParseOutcome, String> {
             // thing; this is the spelling the feature is asked for by.
             "--x-headers" => {
                 push_plugins(&mut plugin_names, "x-headers");
+                i += 1;
+            }
+            // Shorthand for `--plugin sitemap`, matching `--x-headers` above.
+            "--sitemap" => {
+                push_plugins(&mut plugin_names, "sitemap");
                 i += 1;
             }
             "--fresh-interval" => {
@@ -286,6 +293,22 @@ mod tests {
         let h = help();
         assert!(h.contains("--x-headers"));
         assert!(h.contains("x-headers — "), "the plugin catalog lists it");
+    }
+
+    #[test]
+    fn sitemap_is_shorthand_for_the_plugin() {
+        assert!(run(&["--sitemap"]).plugins.has("sitemap"));
+        assert!(run(&["--plugin", "sitemap"]).plugins.has("sitemap"));
+        let c = run(&["--sitemap", "--plugin", "sitemap"]);
+        assert_eq!(c.plugins.names(), vec!["sitemap"]);
+        assert!(!run(&[]).plugins.has("sitemap"));
+    }
+
+    #[test]
+    fn help_mentions_the_sitemap_shorthand() {
+        let h = help();
+        assert!(h.contains("--sitemap"));
+        assert!(h.contains("sitemap — "), "the plugin catalog lists it");
     }
 
     #[test]

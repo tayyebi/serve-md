@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`sitemap` plugin** (`--sitemap`, or `--plugin sitemap`) — a generated
+  `GET /sitemap.xml` listing every document, for search engines. Each entry's
+  `<loc>` is absolute, built from the request's own `Host` header (and
+  `X-Forwarded-Proto`, behind a TLS-terminating proxy); `<lastmod>` comes from
+  the file's own modification time. A hand-written `sitemap.xml` is served in
+  place of the generated one, the same rule `llms.txt` already follows.
+
+### Fixed
+
+- An `<img>` with no explicit `width`/`height` no longer overflows a narrow
+  viewport: rendered pages now carry a `max-width: 100%; height: auto` rule
+  for it. An image that names its own dimensions is left alone.
+
 ## [0.6.0] — 2026-08-30
 
 ### Added

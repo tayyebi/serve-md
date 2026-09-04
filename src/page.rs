@@ -89,6 +89,17 @@ pub fn format_time(t: SystemTime) -> String {
     format!("{y:04}-{m:02}-{d:02} {hour:02}:{minute:02} UTC")
 }
 
+/// A bare calendar date, `YYYY-MM-DD` — the `W3C Datetime` form `<lastmod>`
+/// uses in `/sitemap.xml`. Distinct from [`format_time`] (which adds a clock
+/// reading for a human) and [`format_http_date`] (a different grammar
+/// entirely, for HTTP validators).
+pub fn format_date(t: SystemTime) -> String {
+    let secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let days = secs.div_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 /// The `Last-Modified` / `If-Modified-Since` format: IMF-fixdate, RFC 9110
 /// §5.6.7. Deliberately not [`format_time`] — that one is for humans reading
 /// the listing, and its `YYYY-MM-DD HH:MM UTC` is not a date any HTTP client
@@ -258,6 +269,14 @@ mod tests {
     }
 
     #[test]
+    fn date_formatting() {
+        let at = |s| UNIX_EPOCH + std::time::Duration::from_secs(s);
+        assert_eq!(format_date(SystemTime::UNIX_EPOCH), "1970-01-01");
+        assert_eq!(format_date(at(784_111_777)), "1994-11-06");
+        assert_eq!(format_date(at(1_709_164_800)), "2024-02-29");
+    }
+
+    #[test]
     fn a_date_that_cannot_be_parsed_is_none() {
         // Every one of these makes the caller serve the full response, which
         // is the safe direction.
@@ -395,6 +414,14 @@ mod tests {
     #[test]
     fn pages_without_plugins_have_no_head_markup() {
         let out = listing_html(&[], "");
-        assert!(!out.contains("<style"));
+        // The one <style> tag is the base page's own image rule below, not
+        // anything a plugin contributed.
+        assert_eq!(out.matches("<style").count(), 1);
+    }
+
+    #[test]
+    fn images_without_explicit_dimensions_are_bounded_to_the_page_width() {
+        let out = view_html("a.md", r#"<img src="big.png" alt="">"#, "");
+        assert!(out.contains("img:not([width]):not([height]){max-width:100%;height:auto}"));
     }
 }
