@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — UNRELEASED
+
+### Fixed
+
+- **`GET /mcp` serves documentation again.** Since the 2026-07-28 MCP revision
+  only requires `POST`, `GET` and `HEAD` on the endpoint answered `405`, which
+  also took down the human-readable page that explained the endpoint and
+  listed its tools. That page is back (only the removed GET stream and DELETE
+  session teardown are refused). `POST /mcp`, `OPTIONS /mcp`, `/llms.txt` and
+  `/.well-known/mcp.json` are unchanged.
+
 ## [0.8.0] — 2026-09-04
 
 ### Added

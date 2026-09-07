@@ -905,27 +905,21 @@ fn synthetic(
         return None;
     }
 
-    // The body is built first and written once at the end, rather than through
-    // a closure per arm: a closure capturing `stream` would hold a mutable
-    // borrow across the whole match, which the `MCP_PATH` arm also needs.
+    // The body is built first and written once at the end, so no arm holds a
+    // mutable borrow of `stream` across the match.
     //
     // Every arm is guarded by the plugin that owns it: this function is
     // entered whenever *either* `--plugin webmcp` or `--plugin sitemap` is
     // on, and without the guard the other plugin's routes would answer too,
     // one server exposing a route nobody asked to enable.
     let (body, ctype) = match path {
-        // 2026-07-28 §"Backward Compatibility": a server implementing only
-        // this revision answers GET or DELETE on the MCP endpoint with 405,
-        // since the GET stream and the DELETE session teardown are gone.
-        MCP_PATH if ctx.mcp => {
-            let base = ctx.base();
-            return Some(method_not_allowed(
-                stream,
-                "POST, OPTIONS",
-                &headers::borrow(&base),
-                is_head,
-            ));
-        }
+        // A GET or HEAD on the MCP path serves a human-readable documentation
+        // page describing the endpoint and its tools; the protocol itself
+        // lives only on POST, which is handled before `route` is reached.
+        MCP_PATH if ctx.mcp => (
+            page::mcp_docs_html(&mcp::tools::definitions()),
+            "text/html; charset=utf-8",
+        ),
         LLMS_PATH if ctx.mcp => (
             llms::llms_txt(&ctx.dir, &snap, &ctx.plugins.options(), ctx.mcp),
             "text/plain; charset=utf-8",
@@ -2274,12 +2268,19 @@ mod tests {
     }
 
     #[test]
-    fn get_and_delete_on_the_endpoint_are_refused() {
-        // 2026-07-28 removed the GET stream and the DELETE session teardown.
+    fn get_serves_docs_and_delete_is_refused() {
+        // GET documents the endpoint; POST runs the protocol. The 2026-07-28
+        // revision removed the GET *stream* and the DELETE session teardown,
+        // not the page that explains all of this to a human.
         let addr = start_server_with(tmp_dir("getmcp"), None, None, &["webmcp"]);
-        let (status, resp, _) = http_get(addr, "/mcp", "test-agent", None);
-        assert_eq!(status, 405);
-        assert!(resp.contains("Allow: POST, OPTIONS"), "{resp}");
+        let (status, resp, ct) = http_get(addr, "/mcp", "test-agent", None);
+        assert_eq!(status, 200);
+        assert!(ct.to_ascii_lowercase().contains("text/html"), "{ct}");
+        let body = body_of(&resp);
+        assert!(body.contains("Model Context Protocol"), "{body}");
+        for tool in ["search_docs", "read_doc", "list_docs", "get_outline"] {
+            assert!(body.contains(tool), "{tool} missing from docs: {body}");
+        }
 
         let (status, _) = http_send(
             addr,

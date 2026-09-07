@@ -1,0 +1,58 @@
+<style>
+.mcp body { font-family: system-ui, sans-serif; line-height: 1.5; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
+.mcp h1 { font-size: 1.6rem; }
+.mcp h2 { margin-top: 2rem; font-size: 1.15rem; }
+.mcp code { background: var(--muted, rgba(127,127,127,.15)); padding: .1em .3em; border-radius: 3px; }
+.mcp pre { background: var(--muted, rgba(127,127,127,.15)); padding: .75rem; border-radius: 5px; overflow-x: auto; }
+.mcp table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+.mcp th, .mcp td { text-align: left; vertical-align: top; border-bottom: 1px solid var(--border, rgba(127,127,127,.3)); padding: .5rem .5rem .5rem 0; }
+.mcp th { font-size: .85rem; text-transform: uppercase; letter-spacing: .03em; }
+.mcp ul { margin: 0; padding-left: 1.2rem; }
+.mcp li { margin: .15rem 0; }
+.mcp .req { color: #a05; font-size: .8rem; }
+.mcp .tag { font-size: .75rem; padding: .1em .45em; border: 1px solid var(--border, rgba(127,127,127,.3)); border-radius: 999px; }
+</style>
+
+<h1>Model Context Protocol</h1>
+<p>This serve-md server (<code>v{{version}}</code>) exposes the documents it
+serves to AI agents over the Model Context Protocol, at <code>POST /mcp</code>.
+This page documents that endpoint.</p>
+
+<h2>Calling the endpoint</h2>
+<p>The endpoint speaks JSON-RPC 2.0 over Streamable HTTP. One POST carries one
+request and returns one JSON response. There is no session and no handshake:</p>
+<pre><code>POST /mcp
+Content-Type: application/json
+
+{ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }</code></pre>
+
+<p>Supported methods:</p>
+<ul>
+<li><code>server/discover</code> — capabilities up front (protocol {{protocol}})</li>
+<li><code>tools/list</code> — the tools below</li>
+<li><code>tools/call</code> — run one of the tools</li>
+<li><code>resources/list</code> and <code>resources/read</code> — browse documents</li>
+<li><code>ping</code> — liveness</li>
+</ul>
+
+<h2>Tools</h2>
+<table>
+<thead>
+<tr><th scope="col">Tool</th><th scope="col">Description</th><th scope="col">Arguments</th></tr>
+</thead>
+<tbody>
+{{tools}}
+</tbody>
+</table>
+
+<h2>Resources</h2>
+<p>Every document is also published as an MCP resource with the URI scheme
+<code>serve-md:///&lt;path&gt;</code>, so clients can attach one directly
+without calling a tool.</p>
+
+<h2>Also available</h2>
+<p>Agents and people can discover this server through:</p>
+<ul>
+<li><code><a href="/.well-known/mcp.json">/.well-known/mcp.json</a></code> — the MCP server card</li>
+<li><code><a href="/llms.txt">/llms.txt</a></code> and <code><a href="/llms-full.txt">/llms-full.txt</a></code> — the llms.txt index</li>
+</ul>

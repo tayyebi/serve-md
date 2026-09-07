@@ -1,6 +1,7 @@
 use crate::encoding::percent_encode_path;
+use crate::json::Value;
 use crate::scanner::FileEntry;
-use crate::template::Template;
+use crate::template::{escape_html, Template};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,6 +25,75 @@ pub fn view_html(rel: &str, markdown_html: &str, head: &str) -> String {
     vars.insert("content", markdown_html);
     let body = Template::new(include_str!("../templates/view.html")).render(&vars, &[], &[]);
     render_page(rel, &body, head)
+}
+
+/// The human-readable page served at `GET /mcp`.
+///
+/// `/mcp` answers `POST` with the protocol itself, but the same URL doubles as
+/// a documentation page for a person (or a browser) that stumbles on it with a
+/// GET: what the endpoint is, how to call it, and what tools and resources it
+/// exposes. `defs` is the `tools` array from `mcp::tools::definitions`.
+pub fn mcp_docs_html(defs: &[Value]) -> String {
+    let page = include_str!("../templates/mcp_docs.html");
+    let page = page
+        .replace("{{version}}", env!("CARGO_PKG_VERSION"))
+        .replace("{{protocol}}", crate::mcp::PROTOCOL_LATEST)
+        .replace("{{tools}}", &tool_rows(defs));
+    let mut vars: HashMap<&str, &str> = HashMap::new();
+    vars.insert("title", "Model Context Protocol");
+    vars.insert("body", &page);
+    Template::new(include_str!("../templates/base.html")).render(&vars, &[], &[])
+}
+
+/// The `<tbody>` of the tools table on the MCP documentation page, derived
+/// from the tool definitions so it can never drift from what `tools/list`
+/// actually reports.
+fn tool_rows(defs: &[Value]) -> String {
+    let mut tools = String::new();
+    for d in defs {
+        let name = d.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+        let desc = d
+            .get("description")
+            .and_then(|n| n.as_str())
+            .unwrap_or_default();
+        let schema = d.get("inputSchema");
+        let mut props = String::new();
+        if let Some(Value::Obj(ps)) = schema.and_then(|s| s.get("properties")) {
+            let required: Vec<&str> = match schema.and_then(|s| s.get("required")) {
+                Some(Value::Arr(r)) => r.iter().filter_map(|v| v.as_str()).collect(),
+                _ => Vec::new(),
+            };
+            for (pname, pval) in ps {
+                let ty = pval.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let pdesc = pval
+                    .get("description")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let req = if required.contains(&pname.as_str()) {
+                    " <span class=\"req\">required</span>"
+                } else {
+                    ""
+                };
+                props.push_str(&format!(
+                    "<li><code>{}</code> <span class=\"type\">({})</span>{} — {}</li>",
+                    escape_html(pname),
+                    escape_html(ty),
+                    req,
+                    escape_html(pdesc),
+                ));
+            }
+        }
+        if props.is_empty() {
+            props.push_str("<li><em>no arguments</em></li>");
+        }
+        tools.push_str(&format!(
+            "<tr><td><code>{}</code></td><td>{}</td><td><ul>{}</ul></td></tr>",
+            escape_html(name),
+            escape_html(desc),
+            props,
+        ));
+    }
+    tools
 }
 
 /// The listing a terminal client sees. `mcp` says whether to mention the
