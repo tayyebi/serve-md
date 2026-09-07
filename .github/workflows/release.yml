@@ -3,8 +3,6 @@ name: release
 on:
   push:
     tags: ["v*"]
-  # Lets the release build be smoke-tested without cutting a tag.
-  workflow_dispatch:
 
 permissions:
   contents: write

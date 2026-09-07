@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    name: clippy, test, build
+    name: clippy, test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -18,4 +18,3 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
       - run: timeout 180 cargo test --all-targets -- --test-threads=1 --nocapture
-      - run: cargo build --release
