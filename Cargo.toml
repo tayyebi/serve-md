@@ -10,7 +10,7 @@ keywords = ["markdown", "mcp", "server", "docs", "ai"]
 categories = ["command-line-utilities", "web-programming"]
 
 [dependencies]
-comrak = { version = "0.54", default-features = false }
+comrak = { version = "0.55", default-features = false }
 
 [profile.release]
 strip = true
