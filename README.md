@@ -340,7 +340,81 @@ Or build it yourself — the repo is the only prerequisite:
 cargo install --git https://github.com/tayyebi/serve-md
 ```
 
-A `Dockerfile` is included if you would rather run it in a container:
+Or pull the pre-built image from the GitHub Container Registry. One is
+published for every release, multi-arch (`linux/amd64` and `linux/arm64`),
+built from this repository's `Dockerfile`, and based on Alpine with ripgrep so
+the `webmcp` search tool works out of the box:
+
+```sh
+docker run --rm -p 8080:8080 -v "$PWD:/docs" ghcr.io/tayyebi/serve-md
+```
+
+The tags follow the releases — `1.2.3`, `1.2`, `1`, `latest` — plus `main`
+and `sha-<short>` for builds of unreleased work. The entrypoint already
+passes `--host 0.0.0.0 --port 8080 --dir /docs --no-open`, so anything you
+pass as the command replaces only the default flags
+(`--plugin webmcp --fresh`).
+
+### Docker Compose
+
+If you run serve-md as a service — for instance as a mirror next to your
+files — this is a ready-to-use `compose.yaml`:
+
+```yaml
+# compose.yaml — serve this folder with AI-agent access.
+# Pulls the published image; there is nothing to build. The image's
+# entrypoint already passes --host 0.0.0.0 --port 8080 --dir /docs --no-open,
+# so `command` below only replaces the default flags (--plugin webmcp --fresh).
+services:
+  site:
+    image: ghcr.io/tayyebi/serve-md:latest
+    container_name: tayyebi-github-io
+    ports:
+      # host:container — browse at http://localhost:8018/
+      - "8018:8080"
+    volumes:
+      # Read-only throughout: the server never writes, and --fresh picks up
+      # hand edits to the documents without needing a restart.
+      - .:/docs:ro
+    command:
+      # x-headers: describes the server/each document via response headers.
+      - --plugin=x-headers
+      # math: renders LaTeX math as MathML.
+      - --plugin=math
+      # mermaid: renders mermaid flowcharts as inline SVG.
+      - --plugin=mermaid
+      # webmcp: serves the mirror to AI agents at /mcp, /llms.txt and
+      # /llms-full.txt. The published image ships ripgrep for its search tool.
+      - --plugin=webmcp
+      # Pick up edits to the documents without a restart.
+      - --fresh
+    # The container never writes: not /docs, not its own root filesystem.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Uncomment to restart the container if the site stops answering.
+    # (Leave commented out if you set --user: / then answers 401.)
+    # healthcheck:
+    #   test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+    #   interval: 30s
+    #   timeout: 5s
+    #   retries: 3
+    #   start_period: 5s
+    restart: unless-stopped
+```
+
+```sh
+docker compose up -d
+```
+
+To put the mirror behind Basic auth, set `SERVE_MD_PASSWORD` in
+`environment:` and add `--user=<name>` to `command:`; serve-md speaks plain
+HTTP only, so put it behind a TLS-terminating reverse proxy if it faces the
+open internet.
+
+If you would rather build the image yourself, the `Dockerfile` is right there:
 
 ```sh
 docker build -t serve-md . && docker run --rm -p 8080:8080 -v "$PWD:/docs" serve-md

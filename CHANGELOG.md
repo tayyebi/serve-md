@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.9.0] — UNRELEASED
 
+### Added
+
+- **Pre-built container image.** Every `v*` tag — and every push to `main` —
+  now publishes a multi-arch (`linux/amd64` and `linux/arm64`) image to
+  `ghcr.io/tayyebi/serve-md`, built from the `Dockerfile` on native runners
+  (`ubuntu-latest` and `ubuntu-24.04-arm`) and merged into one manifest list.
+  Release tags carry semver tags (`1.2.3`, `1.2`, `1`) and `latest`; `main`
+  carries `main` and `sha-<short>`. A ready-to-use `compose.yaml` for it is
+  shown in the README.
+
 ### Fixed
 
 - **`GET /mcp` serves documentation again.** Since the 2026-07-28 MCP revision

@@ -19,6 +19,15 @@ COPY --from=build /src/target/release/serve-md /usr/local/bin/serve-md
 
 # The documents to serve are mounted here:
 #   docker run --rm -p 8080:8080 -v "$PWD:/docs" ghcr.io/tayyebi/serve-md
+#
+# This file is the source of the image published to ghcr.io by
+# .github/workflows/docker.yml on every release tag.
+LABEL org.opencontainers.image.source="https://github.com/tayyebi/serve-md" \
+      org.opencontainers.image.url="https://github.com/tayyebi/serve-md" \
+      org.opencontainers.image.title="serve-md" \
+      org.opencontainers.image.description="A minimal web server that renders Markdown and HTML — and speaks MCP, so AI agents can search it." \
+      org.opencontainers.image.licenses="MIT"
+
 WORKDIR /docs
 EXPOSE 8080
 
