@@ -4,7 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.0] — UNRELEASED
+## [0.10.0] — 2026-11-06
+
+### Added
+
+- **Pre-built container image.** Every `v*` tag — and every push to `main` —
+  now publishes a multi-arch (`linux/amd64` and `linux/arm64`) image to
+  `ghcr.io/tayyebi/serve-md`, built from the `Dockerfile` on native runners
+  (`ubuntu-latest` and `ubuntu-24.04-arm`) and merged into one manifest list.
+  Release tags carry semver tags (`0.10.0`, `0.10`, `0`) and `latest`; `main`
+  carries `main` and `sha-<short>`. A ready-to-use `compose.yaml` for it is
+  shown in the README.
+
+### Changed
+
+- The release workflow builds the binaries only on `v*` tags, not on every
+  push to `main`.
+
+## [0.9.0] — 2026-09-07
 
 ### Fixed
 
